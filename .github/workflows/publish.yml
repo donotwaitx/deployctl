@@ -1,0 +1,40 @@
+name: Publish to PyPI & GitHub Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-publish:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: ⚡ Set up uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: 📦 Build Distribution
+        run: uv build
+
+      - name: 🚀 Publish to PyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$UV_PUBLISH_TOKEN" ]; then
+            uv publish --token "$UV_PUBLISH_TOKEN"
+          else
+            echo "PYPI_API_TOKEN not set, skipping PyPI upload."
+          fi
+
+      - name: 🏷️ Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

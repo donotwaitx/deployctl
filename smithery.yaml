@@ -1,0 +1,8 @@
+# Smithery configuration for deployctl MCP Server
+# https://smithery.ai/docs/config
+
+startCommand:
+  type: stdio
+  config:
+    command: deployctl
+    args: ["mcp"]

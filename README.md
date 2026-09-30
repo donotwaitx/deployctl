@@ -194,9 +194,11 @@ Add to `~/.claude.json` or project settings:
 
 ---
 
-## 🔄 GitHub Actions CI/CD Recipe
+## 🔄 GitHub Actions CI/CD Integration
 
-Add `.github/workflows/deploy.yml` to your repository:
+### Option A: Using the Official GitHub Action (Recommended)
+
+Simply use `donotwaitx/deployctl@main` in your workflow:
 
 ```yaml
 name: Deploy to Hosting
@@ -208,34 +210,38 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up uv & Python
+      - name: 🚀 Ultra-Fast Deploy
+        uses: donotwaitx/deployctl@main
+        with:
+          host: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftp
+          remote_path: "/public_html"
+          app_url: "https://example.com"
+          zip_deploy: "true"
+          remote_scan: "true"
+```
+
+### Option B: Using CLI directly via `uv`
+
+```yaml
+      - name: 🐍 Set up uv
         uses: astral-sh/setup-uv@v3
 
-      - name: 🚀 Deploy via deployctl
+      - name: 🚀 Deploy via deployctl CLI
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASSWORD }}
         run: |
           uv tool install deployctl
-          
-          deployctl credential add prod-cred \
-            --host "$FTP_HOST" \
-            --username "$FTP_USER" \
-            --password "$FTP_PASS" \
-            --protocol ftp
-            
-          deployctl project set my-app production \
-            --credential prod-cred \
-            --remote-path "/public_html" \
-            --zip \
-            --app-url "https://example.com"
-            
+          deployctl credential add prod-cred --host "$FTP_HOST" --username "$FTP_USER" --password "$FTP_PASS"
+          deployctl project set my-app production --credential prod-cred --remote-path "/public_html" --zip --app-url "https://example.com"
           deployctl deploy my-app production --yes --remote-scan
 ```
 

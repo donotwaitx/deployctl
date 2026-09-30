@@ -1,0 +1,125 @@
+name: "deployctl Fast Deploy"
+description: "Ultra-fast differential FTP/FTPS/SFTP deployment using Zip & PHP Auto-Extract Bridge."
+author: "donotwaitx"
+branding:
+  icon: "upload-cloud"
+  color: "blue"
+
+inputs:
+  project:
+    description: "Project name identifier"
+    required: false
+    default: "app"
+  environment:
+    description: "Deployment environment (production, staging)"
+    required: false
+    default: "production"
+  host:
+    description: "Server hostname or IP address"
+    required: true
+  username:
+    description: "FTP/SFTP username"
+    required: true
+  password:
+    description: "FTP/SFTP password (use secrets)"
+    required: false
+  port:
+    description: "Connection port (21 for FTP, 22 for SFTP)"
+    required: false
+  protocol:
+    description: "Protocol to use: ftp, ftps, sftp"
+    required: false
+    default: "ftp"
+  remote_path:
+    description: "Target remote path on hosting (e.g. /public_html)"
+    required: false
+    default: "/public_html"
+  local_path:
+    description: "Local directory to deploy"
+    required: false
+    default: "."
+  zip_deploy:
+    description: "Use Zip archive & Remote PHP Auto-Extract Bridge (recommended for fast deploys)"
+    required: false
+    default: "true"
+  app_url:
+    description: "Public web URL of the target app for PHP extraction trigger (e.g. https://example.com)"
+    required: false
+  remote_scan:
+    description: "Force live remote scanning"
+    required: false
+    default: "true"
+  dry_run:
+    description: "Simulate changes without uploading"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - name: Install deployctl
+      shell: bash
+      run: |
+        uv tool install git+https://github.com/donotwaitx/deployctl.git --force
+
+    - name: Configure Credential
+      shell: bash
+      env:
+        HOST: ${{ inputs.host }}
+        USERNAME: ${{ inputs.username }}
+        PASSWORD: ${{ inputs.password }}
+        PORT: ${{ inputs.port }}
+        PROTOCOL: ${{ inputs.protocol }}
+      run: |
+        PORT_ARG=""
+        if [ -n "$PORT" ]; then
+          PORT_ARG="--port $PORT"
+        fi
+        
+        deployctl credential add "ci-${{ inputs.project }}-${{ inputs.environment }}" \
+          --host "$HOST" \
+          --username "$USERNAME" \
+          --password "$PASSWORD" \
+          --protocol "$PROTOCOL" \
+          $PORT_ARG
+
+    - name: Configure Project Target
+      shell: bash
+      run: |
+        ZIP_ARG=""
+        if [ "${{ inputs.zip_deploy }}" = "true" ]; then
+          ZIP_ARG="--zip"
+        else
+          ZIP_ARG="--no-zip"
+        fi
+
+        URL_ARG=""
+        if [ -n "${{ inputs.app_url }}" ]; then
+          URL_ARG="--app-url '${{ inputs.app_url }}'"
+        fi
+
+        deployctl project set "${{ inputs.project }}" "${{ inputs.environment }}" \
+          --credential "ci-${{ inputs.project }}-${{ inputs.environment }}" \
+          --remote-path "${{ inputs.remote_path }}" \
+          --local-path "${{ inputs.local_path }}" \
+          --protocol "${{ inputs.protocol }}" \
+          $ZIP_ARG \
+          $URL_ARG
+
+    - name: Execute Deployment
+      shell: bash
+      run: |
+        FLAGS="--yes"
+        if [ "${{ inputs.remote_scan }}" = "true" ]; then
+          FLAGS="$FLAGS --remote-scan"
+        fi
+        if [ "${{ inputs.dry_run }}" = "true" ]; then
+          FLAGS="$FLAGS --dry-run"
+        fi
+
+        deployctl deploy "${{ inputs.project }}" "${{ inputs.environment }}" $FLAGS
