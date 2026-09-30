@@ -1,0 +1,60 @@
+[project]
+name = "deployctl"
+version = "0.1.0"
+description = "Secure, ultra-fast differential deployment CLI & Model Context Protocol (MCP) server for AI Agents and Developers."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "deployctl Team", email = "contact@deployctl.dev" }
+]
+keywords = [
+    "deployment",
+    "ftp",
+    "ftps",
+    "sftp",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "antigravity",
+    "claude-code",
+    "ci-cd",
+    "fast-deploy",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: System :: Installation/Setup",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "keyring>=25.7.0",
+    "paramiko>=5.0.0",
+    "pyyaml>=6.0.2",
+    "rich>=13.9.0",
+    "typer>=0.15.0",
+]
+
+[project.scripts]
+deployctl = "deployctl.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/donotwaitx/deployctl"
+Repository = "https://github.com/donotwaitx/deployctl"
+Issues = "https://github.com/donotwaitx/deployctl/issues"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
