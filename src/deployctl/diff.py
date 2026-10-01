@@ -104,6 +104,7 @@ def compute_diff(
     local_files: dict[str, LocalFileInfo],
     remote_files: dict[str, Any],
     detect_deletions: bool = False,
+    exclude_patterns: list[str] | None = None,
 ) -> DiffResult:
     """Compare local files with remote files to determine changes.
     
@@ -138,8 +139,12 @@ def compute_diff(
 
     if detect_deletions:
         for rel_path in remote_files:
-            if rel_path not in local_files:
-                diff.deleted.append(rel_path)
+            if rel_path in local_files:
+                continue
+            # Never delete remote files that are excluded from deployment (.env, storage, ...)
+            if exclude_patterns and is_excluded(rel_path, exclude_patterns):
+                continue
+            diff.deleted.append(rel_path)
 
     diff.added.sort()
     diff.modified.sort()

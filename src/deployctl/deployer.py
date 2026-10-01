@@ -514,7 +514,7 @@ def run_deployment(
     if cached_state and "files" in cached_state:
         # Instant diff using local state cache (~0.02s)
         remote_files = cached_state.get("files", {})
-        diff = compute_diff(local_files, remote_files, detect_deletions=True)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
     else:
         remote_files = {}
         scanned_via_bridge = False
@@ -569,7 +569,7 @@ def run_deployment(
                     logger.error(f"Connection failed: {str(e)}")
                     return False
 
-        diff = compute_diff(local_files, remote_files, detect_deletions=True)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
 
     # 6. Dry Run Check
     if dry_run:
