@@ -126,13 +126,14 @@ projects:
       post_deploy_delete:             # server files removed after a successful deploy (framework caches)
         - bootstrap/cache/*.php
       insecure_tls: false             # true only for self-signed hosts: skips certificate checks
-      delete_missing: false           # upload-only: never delete files that exist only on the server
+      delete_missing: owned           # owned (default) | all | none - which server files a deploy may delete
 ```
 
 * Every deployment records the git **branch, commit and dirty state**. Without `allowed_branches`, deploying from a branch other than `main` / `master` / `develop` only prints a warning, as does deploying from a different branch than the last deployment (files that exist only in the other branch can linger on the server).
 * Files whose deletion fails are reported, kept in the state cache and retried by the next deployment; deletions never run when an upload failed.
 * The state cache is ignored once it is older than `state_max_age_days` (default 7, in `config.yaml`) and the server is scanned again.
-* **Deleting server files always needs an explicit yes** (`--yes`, or `yes=true` over MCP); until then the run stops with `DELETIONS_NEED_CONFIRMATION` and the list of files. Targets whose server also receives files (admin uploads, generated thumbnails) should set `delete_missing: false`: such files are reported as `skipped_deletes` and never removed.
+* **Server files take priority.** By default (`delete_missing: owned`) a deploy only deletes files deployctl itself deployed earlier and that are now gone locally. Files that exist only on the server (admin uploads, generated thumbnails) are never removed; they are listed as `skipped_deletes`. `all` restores the old "mirror the local tree" behaviour, `none` never deletes. Change it with `deployctl project set <project> <env> --delete-missing owned|all|none` or the MCP tool `set_target_option`.
+* **Deleting server files always needs an explicit yes** (`--yes`, or `yes=true` over MCP); until then the run stops with `DELETIONS_NEED_CONFIRMATION` and the list of files.
 * Only one deployment per `project:environment` runs at a time.
 * `post_deploy_delete` patterns are relative to `remote_path`; only the file-name part may contain wildcards.
 
@@ -214,6 +215,7 @@ Add to `~/.claude.json` or project settings:
 * `show_project`: View sanitized target settings.
 * `browse_remote_directories`: Browse remote server folder hierarchy.
 * `download_remote_file`: Download one remote file (e.g. a log) to `~/.deployctl/downloads/<project>/<env>/` and return its redacted tail.
+* `set_target_option`: Change a validated target option (`delete_missing`, `allowed_branches`, `require_clean`, `insecure_tls`, `post_deploy_delete`, `app_url`, `zip_deploy`).
 * `set_remote_path`: Configure remote destination folder.
 
 ---

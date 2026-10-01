@@ -416,20 +416,7 @@ def _server_only_upload(target):
     return path
 
 
-def test_deleting_server_files_needs_confirmation_when_not_interactive(target):
-    orphan = _server_only_upload(target)
-
-    ok, report = _deploy(skip_confirm=False, interactive=False)
-    assert not ok and report.status == "DELETIONS_NEED_CONFIRMATION"
-    assert report.deleted == ["uploads/from-admin.png"]  # listed so the caller can review it
-    assert orphan.exists() and not (target.remote / "a.txt").exists()
-
-    ok, report = _deploy(skip_confirm=True, interactive=False)
-    assert ok and not orphan.exists()
-
-
-def test_delete_missing_false_never_removes_server_only_files(target):
-    target.env["delete_missing"] = False
+def test_server_only_files_are_protected_by_default(target):
     orphan = _server_only_upload(target)
 
     ok, report = _deploy(skip_confirm=False, interactive=False)
@@ -437,9 +424,76 @@ def test_delete_missing_false_never_removes_server_only_files(target):
     assert orphan.exists() and (target.remote / "a.txt").exists()
     assert report.skipped_deletes == ["uploads/from-admin.png"] and report.deleted == []
     assert report.to_dict()["skipped_deletes"] == ["uploads/from-admin.png"]
-    assert any("delete_missing" in w for w in report.warnings)
+    assert any("did not deploy" in w for w in report.warnings)
 
-    # it stays reported on later runs, never deleted
+    # a file deployctl deployed earlier and that was since removed locally may be deleted, but only after a yes
     (target.local / "b.txt").write_text("b")
+    assert _deploy()[0]
+    (target.local / "b.txt").unlink()
+
     ok, report = _deploy(skip_confirm=False, interactive=False)
-    assert ok and orphan.exists()
+    assert not ok and report.status == "DELETIONS_NEED_CONFIRMATION"
+    assert report.deleted == ["b.txt"] and (target.remote / "b.txt").exists()
+
+    ok, report = _deploy(skip_confirm=True, interactive=False)
+    assert ok and not (target.remote / "b.txt").exists() and orphan.exists()
+
+
+def test_delete_missing_all_removes_server_only_files_after_confirmation(target):
+    target.env["delete_missing"] = "all"
+    orphan = _server_only_upload(target)
+
+    ok, report = _deploy(skip_confirm=False, interactive=False)
+    assert not ok and report.status == "DELETIONS_NEED_CONFIRMATION"
+    assert report.deleted == ["uploads/from-admin.png"]
+    assert orphan.exists() and not (target.remote / "a.txt").exists()
+
+    ok, report = _deploy(skip_confirm=True, interactive=False)
+    assert ok and not orphan.exists()
+
+
+def test_delete_missing_none_never_deletes_anything(target):
+    target.env["delete_missing"] = False  # YAML `false` means none
+    (target.local / "b.txt").write_text("b")
+    assert _deploy()[0]
+    (target.local / "b.txt").unlink()
+    orphan = _server_only_upload(target)
+
+    ok, report = _deploy(skip_confirm=False, interactive=False)
+    assert ok and (target.remote / "b.txt").exists() and orphan.exists()
+    assert report.skipped_deletes == ["b.txt"]  # the cache-based diff never even looks at server-only files
+
+
+def test_normalize_delete_missing():
+    from deployctl.config import normalize_delete_missing
+
+    assert [normalize_delete_missing(v) for v in (None, True, False, "ALL", "none", "owned", "bogus", 3)] == [
+        "owned", "all", "none", "all", "none", "owned", "owned", "owned",
+    ]
+
+
+def test_mcp_set_target_option_validates_and_edits_the_registry(tmp_path, monkeypatch):
+    import deployctl.config as config
+    import deployctl.mcp as mcp
+
+    registry = tmp_path / "projects.yaml"
+    registry.write_text("projects:\n  p:\n    demo:\n      remote_path: /x\n")
+    monkeypatch.setattr(config, "PROJECTS_FILE", registry)
+    monkeypatch.setattr(mcp, "PROJECTS_FILE", registry)
+    monkeypatch.setattr(config, "DEPLOYCTL_HOME", tmp_path)
+    monkeypatch.setattr(config, "LOGS_DIR", tmp_path / "logs")
+
+    def call(**args):
+        return mcp.handle_tool_call("set_target_option", {"project": "p", "environment": "demo", **args})
+
+    assert call(option="delete_missing", value="ALL")["isError"] is False
+    assert "delete_missing: all" in registry.read_text()
+    assert call(option="allowed_branches", value=["develop", "main"])["isError"] is False
+
+    assert call(option="delete_missing", value="sometimes")["isError"] is True
+    assert call(option="remote_path", value="/etc")["isError"] is True  # not an allowed option
+    assert call(option="require_clean", value="yes")["isError"] is True
+    assert mcp.handle_tool_call("set_target_option", {"project": "nope", "option": "require_clean", "value": True})["isError"] is True
+
+    assert call(option="delete_missing", value=None)["isError"] is False
+    assert "delete_missing" not in registry.read_text() and "develop" in registry.read_text()

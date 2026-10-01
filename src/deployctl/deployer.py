@@ -34,6 +34,7 @@ from deployctl.config import (
     get_project_target,
     load_global_config,
     load_projects,
+    normalize_delete_missing,
     save_projects,
 )
 from deployctl.credentials import get_credential
@@ -732,7 +733,8 @@ def _run_deployment(
     cached_state = None if remote_scan else load_deployment_state(project, environment)
     git = get_git_context(local_dir)
     report.git = git
-    previous_git = ((load_deployment_state(project, environment) or {}).get("metadata") or {}).get("git")
+    previous_state = load_deployment_state(project, environment) or {}
+    previous_git = (previous_state.get("metadata") or {}).get("git")
     git_warnings, git_blockers = evaluate_git_policy(git, env_cfg, previous_git)
     if git.get("available"):
         logger.info(f"Git: branch={git['branch']} commit={git['commit']} dirty_files={git['dirty_files']}")
@@ -850,14 +852,19 @@ def _run_deployment(
 
         diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
 
-    # `delete_missing: false` makes the target upload-only: files that exist only on the server (admin
-    # uploads, generated files) are reported but never removed
-    if not env_cfg.get("delete_missing", True) and diff.deleted:
-        report.skipped_deletes = list(diff.deleted)
-        diff.deleted = []
-        report.warnings.append(
-            f"{len(report.skipped_deletes)} file(s) exist only on the server and were left alone (delete_missing is false)"
-        )
+    # Server files take priority: by default only files deployctl deployed earlier (the state manifest) may be
+    # deleted. Files that exist only on the server (admin uploads, generated files) are reported, never removed.
+    delete_mode = normalize_delete_missing(env_cfg.get("delete_missing"))
+    if diff.deleted and delete_mode != "all":
+        owned = set(previous_state.get("files", {})) if delete_mode == "owned" else set()
+        deletable = [f for f in diff.deleted if f in owned]
+        report.skipped_deletes = [f for f in diff.deleted if f not in owned]
+        diff.deleted = deletable
+        if report.skipped_deletes:
+            reason = "delete_missing is none" if delete_mode == "none" else "deployctl did not deploy them"
+            report.warnings.append(
+                f"{len(report.skipped_deletes)} file(s) exist only on the server and were left alone ({reason})"
+            )
 
     report.added, report.modified, report.deleted = list(diff.added), list(diff.modified), list(diff.deleted)
     report.unchanged_count = len(diff.unchanged)
@@ -898,7 +905,7 @@ def _run_deployment(
             False,
             "DELETIONS_NEED_CONFIRMATION",
             f"{len(diff.deleted)} file(s) that exist only on the server would be deleted (see files.deleted). "
-            "Repeat the call with yes=true to delete them, or set delete_missing: false on the target to never delete.",
+            "Repeat the call with yes=true to delete them, or set delete_missing: none on the target to never delete.",
         )
 
     if needs_delete_confirm:

@@ -12,7 +12,7 @@ from typing import Any
 
 from rich.console import Console
 
-from deployctl.config import PROJECTS_FILE, load_projects, save_projects
+from deployctl.config import DELETE_MODES, PROJECTS_FILE, load_projects, save_projects
 from deployctl.credentials import get_credential
 from deployctl import deployer
 from deployctl.deployer import (
@@ -23,6 +23,17 @@ from deployctl.deployer import (
     test_target_connection,
 )
 from deployctl.report import DeployReport
+
+# Target options `set_target_option` may change, with the check each value must pass
+TARGET_OPTIONS = {
+    "delete_missing": lambda v: isinstance(v, str) and v.lower() in DELETE_MODES,
+    "allowed_branches": lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v),
+    "require_clean": lambda v: isinstance(v, bool),
+    "insecure_tls": lambda v: isinstance(v, bool),
+    "post_deploy_delete": lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v),
+    "app_url": lambda v: isinstance(v, str) and v.startswith(("http://", "https://")),
+    "zip_deploy": lambda v: isinstance(v, bool),
+}
 
 MCP_TOOLS = [
     {
@@ -177,6 +188,20 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "set_target_option",
+        "description": "Change one safety/behaviour option of an existing deployment target in projects.yaml. Options: delete_missing (owned = default, only delete files deployctl itself deployed; all; none), allowed_branches (list of branch names), require_clean (bool), insecure_tls (bool), post_deploy_delete (list of file patterns), app_url (string), zip_deploy (bool).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name"},
+                "environment": {"type": "string", "description": "Environment name (default: production)", "default": "production"},
+                "option": {"type": "string", "enum": sorted(TARGET_OPTIONS), "description": "Option to change"},
+                "value": {"description": "New value; null removes the option so the default applies"},
+            },
+            "required": ["project", "option"],
+        },
+    },
+    {
         "name": "set_remote_path",
         "description": "Configure the remote deployment destination directory (remote_path) for a project and environment in projects.yaml.",
         "inputSchema": {
@@ -278,6 +303,31 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
             return {
                 "content": [{"type": "text", "text": json.dumps(res, indent=2)}],
                 "isError": not res.get("ok", True),
+            }
+
+        elif tool_name == "set_target_option":
+            project = arguments.get("project", "")
+            environment = arguments.get("environment", "production")
+            option = arguments.get("option", "")
+            value = arguments.get("value")
+            if option not in TARGET_OPTIONS:
+                return {"content": [{"type": "text", "text": f"Error: option must be one of {sorted(TARGET_OPTIONS)}"}], "isError": True}
+            if value is not None and not TARGET_OPTIONS[option](value):
+                return {"content": [{"type": "text", "text": f"Error: invalid value for {option}: {value!r}"}], "isError": True}
+
+            data = load_projects(PROJECTS_FILE)
+            envs = data.get("projects", {}).get(project)
+            target_env = next((e for e in (envs or {}) if e.lower() == environment.lower()), None)
+            if target_env is None:
+                return {"content": [{"type": "text", "text": f"Error: target {project}:{environment} does not exist"}], "isError": True}
+            if value is None:
+                data["projects"][project][target_env].pop(option, None)
+            else:
+                data["projects"][project][target_env][option] = value.lower() if option == "delete_missing" else value
+            save_projects(data)
+            return {
+                "content": [{"type": "text", "text": f"{project}:{target_env} {option} = {value!r}" if value is not None else f"{project}:{target_env} {option} removed (default applies)"}],
+                "isError": False,
             }
 
         elif tool_name == "set_remote_path":
