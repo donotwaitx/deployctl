@@ -89,7 +89,11 @@ class LocalProvider(BaseProvider):
 
     def list_dir(self, remote_dir: str = "") -> list[dict[str, Any]]:
         self.connect()
-        clean = remote_dir.strip().lstrip("/")
+        clean = remote_dir.strip()
+        # Like the FTP/SFTP providers, accept an absolute path that already includes the base directory
+        if clean.startswith(str(self.dest_root)):
+            clean = clean[len(str(self.dest_root)):]
+        clean = clean.lstrip("/")
         target = (self.dest_root / clean).resolve() if clean else self.dest_root
         if not target.exists() or not target.is_dir():
             return []

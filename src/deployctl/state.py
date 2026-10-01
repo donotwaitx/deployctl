@@ -45,8 +45,13 @@ def save_deployment_state(
     environment: str,
     local_files: dict[str, Any],
     metadata: dict[str, Any] | None = None,
+    extra_files: list[str] | None = None,
 ) -> None:
-    """Save the current deployed file manifest to local state cache."""
+    """Save the current deployed file manifest to local state cache.
+
+    `extra_files` are remote paths that are not in `local_files` but are still on the server (a deletion
+    that failed). Keeping them in the manifest makes the next deployment try to delete them again.
+    """
     state_file = get_state_file(project, environment)
     _ensure_state_dir()
 
@@ -58,6 +63,9 @@ def save_deployment_state(
             "size": size,
             "mtime": mtime,
         }
+
+    for rel_path in extra_files or []:
+        manifest.setdefault(rel_path, {"size": None, "mtime": None})
 
     payload = {
         "project": project,

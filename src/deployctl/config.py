@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "enforce_project_isolation": False,
     "confirm_production": True,
     "log_retention_days": 30,
+    # A state cache older than this is ignored and the remote is scanned again (0 = never expires).
+    "state_max_age_days": 7,
     "default_excludes": DEFAULT_EXCLUDES,
 }
 

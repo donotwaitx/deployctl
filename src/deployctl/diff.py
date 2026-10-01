@@ -52,8 +52,10 @@ def is_excluded(rel_path: str, exclude_patterns: list[str]) -> bool:
         if any(fnmatch.fnmatch(part, pattern) for part in parts):
             return True
         # Check wildcard directory prefix
-        if pattern.endswith("/**") and (norm_path.startswith(pattern[:-3]) or any(part == pattern[:-3] for part in parts)):
-            return True
+        if pattern.endswith("/**"):
+            prefix = pattern[:-3]
+            if norm_path == prefix or norm_path.startswith(prefix + "/") or prefix in parts:
+                return True
 
     return False
 

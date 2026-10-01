@@ -113,6 +113,27 @@ deployctl deploy my-webapp production --dry-run
 deployctl deploy my-webapp production --yes
 ```
 
+### 5. Target safeguards (optional)
+
+Extra keys on a target in `~/.deployctl/projects.yaml`:
+
+```yaml
+projects:
+  my-webapp:
+    production:
+      allowed_branches: [main]        # refuse to deploy from any other branch (use --force to override)
+      require_clean: true             # refuse to deploy with uncommitted changes in local_path
+      post_deploy_delete:             # server files removed after a successful deploy (framework caches)
+        - bootstrap/cache/*.php
+      insecure_tls: false             # true only for self-signed hosts: skips certificate checks
+```
+
+* Every deployment records the git **branch, commit and dirty state**. Without `allowed_branches`, deploying from a branch other than `main` / `master` / `develop` only prints a warning, as does deploying from a different branch than the last deployment (files that exist only in the other branch can linger on the server).
+* Files whose deletion fails are reported, kept in the state cache and retried by the next deployment; deletions never run when an upload failed.
+* The state cache is ignored once it is older than `state_max_age_days` (default 7, in `config.yaml`) and the server is scanned again.
+* Only one deployment per `project:environment` runs at a time.
+* `post_deploy_delete` patterns are relative to `remote_path`; only the file-name part may contain wildcards.
+
 ---
 
 ## 📖 CLI Reference
@@ -185,11 +206,12 @@ Add to `~/.claude.json` or project settings:
 ```
 
 ### Available MCP Tools:
-* `deploy_project`: Deploy projects with differential diffs and zip strategy.
+* `deploy_project`: Deploy projects with differential diffs and zip strategy. Never prompts: a production deploy first returns `CONFIRMATION_REQUIRED` with the diff, and runs when repeated with `yes=true`. Returns a JSON report (status, git branch/commit, warnings, file lists, failed uploads/deletes).
 * `list_projects`: Inspect configured projects and targets.
 * `test_connection`: Test server connectivity.
 * `show_project`: View sanitized target settings.
 * `browse_remote_directories`: Browse remote server folder hierarchy.
+* `download_remote_file`: Download one remote file (e.g. a log) to `~/.deployctl/downloads/<project>/<env>/` and return its redacted tail.
 * `set_remote_path`: Configure remote destination folder.
 
 ---
@@ -252,7 +274,8 @@ jobs:
 1. **Passwords Never Logged:** Passwords, API tokens, and SSH keys are automatically masked (`[REDACTED]`) in all logs, error traces, and MCP responses.
 2. **Self-Destructing PHP Bridges:** Temporary PHP worker scripts execute in memory, enforce 32-hex random authentication tokens, and self-delete immediately upon execution (`register_shutdown_function` + `@unlink`).
 3. **Project Isolation Safeguards:** Prevents accidental cross-deployments when working in different repository working trees.
-4. **Smart DNS Bypass:** Automatically supports IP targeting with virtual host `Host` headers when custom domains are not yet pointed to DNS.
+4. **TLS Verified by Default:** Requests to the PHP bridges verify the server certificate. Set `insecure_tls: true` on a target to skip verification; only then is the server-IP fallback (virtual host `Host` header) tried, since a certificate is never valid for a bare IP.
+5. **Constant-time Token Check:** The PHP bridges compare tokens with `hash_equals`.
 
 ---
 
