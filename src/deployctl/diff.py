@@ -7,10 +7,16 @@ and compares with remote state.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+# Files up to this size get a content hash (local scan, state cache and the PHP scan bridge all use it); larger
+# files, which are rarely source code, are compared by size and modification time only.
+HASH_MAX_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -19,6 +25,22 @@ class LocalFileInfo:
     abs_path: Path
     size: int
     mtime: float
+    sha1: str | None = None  # filled lazily by file_sha1()
+
+
+def file_sha1(info: LocalFileInfo) -> str | None:
+    """SHA-1 of a local file's content, or `None` when it is over HASH_MAX_BYTES or unreadable.
+
+    The digest is cached on `info`, so diffing and saving the state cache read each file once.
+    """
+    if info.size > HASH_MAX_BYTES:
+        return None
+    if info.sha1 is None:
+        try:
+            info.sha1 = hashlib.sha1(info.abs_path.read_bytes()).hexdigest()
+        except OSError:
+            return None
+    return info.sha1
 
 
 @dataclass
@@ -124,10 +146,22 @@ def compute_diff(
             if remote_size is None and isinstance(remote_info, dict):
                 remote_size = remote_info.get("size")
 
+            remote_sha1 = getattr(remote_info, "sha1", None)
+            if remote_sha1 is None and isinstance(remote_info, dict):
+                remote_sha1 = remote_info.get("sha1")
+
             # If sizes differ, or if local file is newer by more than 2 seconds (FAT/FTP timestamp tolerance)
             if remote_size is not None and remote_size != local_info.size:
                 diff.modified.append(rel_path)
                 diff.total_upload_bytes += local_info.size
+            elif remote_sha1 and (local_sha1 := file_sha1(local_info)):
+                # Same size and both sides hashed: the content decides, not the timestamp (git checkout
+                # rewrites mtimes; an edit that keeps the byte count shows only in the hash)
+                if local_sha1 != remote_sha1:
+                    diff.modified.append(rel_path)
+                    diff.total_upload_bytes += local_info.size
+                else:
+                    diff.unchanged.append(rel_path)
             else:
                 remote_mtime = getattr(remote_info, "mtime", None)
                 if remote_mtime is None and isinstance(remote_info, dict):

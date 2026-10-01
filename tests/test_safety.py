@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -326,3 +328,78 @@ def test_php_scan_bridge_skips_symlinks_and_unreadable_entries():
     assert "isLink()" in script and "CATCH_GET_CHILD" in script and "catch (Throwable" in script
     # the PHP source must still hold the Windows path separator replacement it had before
     assert "str_replace('\\\\', '/'" in script
+
+
+# --- content hashes --------------------------------------------------------------------------------------
+
+
+def test_diff_compares_content_when_both_sides_have_a_hash(tmp_path):
+    import hashlib
+
+    from deployctl.diff import LocalFileInfo, compute_diff, file_sha1
+
+    f = tmp_path / "a.php"
+    f.write_text("aaaa")
+    info = LocalFileInfo("a.php", f, 4, f.stat().st_mtime)
+    sha = lambda data: hashlib.sha1(data).hexdigest()  # noqa: E731
+
+    # newer local mtime, same content: unchanged (this is what git checkout does to every file)
+    old_mtime = f.stat().st_mtime - 3600
+    diff = compute_diff({"a.php": info}, {"a.php": {"size": 4, "mtime": old_mtime, "sha1": sha(b"aaaa")}})
+    assert diff.unchanged == ["a.php"] and not diff.modified
+
+    # same size and mtime, different content: modified
+    diff = compute_diff({"a.php": info}, {"a.php": {"size": 4, "mtime": f.stat().st_mtime, "sha1": sha(b"bbbb")}})
+    assert diff.modified == ["a.php"]
+
+    # no remote hash: the old size/mtime behaviour is unchanged
+    diff = compute_diff({"a.php": info}, {"a.php": {"size": 4, "mtime": old_mtime}})
+    assert diff.modified == ["a.php"]
+
+    # files over the hash limit are never hashed
+    big = LocalFileInfo("big.bin", f, 10**9, f.stat().st_mtime)
+    assert file_sha1(big) is None
+
+
+def test_state_cache_keeps_hashes_so_a_touched_file_is_not_redeployed(target):
+    assert _deploy()[0]
+    assert load_deployment_state("p", "demo")["files"]["a.txt"]["sha1"]
+
+    # rewrite with identical content and a newer mtime, as a branch switch does
+    path = target.local / "a.txt"
+    path.write_text("a")
+    new_time = time.time() + 60
+    os.utime(path, (new_time, new_time))
+    ok, report = _deploy()
+    assert ok and report.status == "UP_TO_DATE"
+
+    # same byte count, different content: detected
+    path.write_text("b")
+    ok, report = _deploy()
+    assert ok and report.modified == ["a.txt"] and (target.remote / "a.txt").read_text() == "b"
+
+
+def test_ftp_scan_warns_that_it_compares_sizes_only(target):
+    ok, report = _deploy()
+    assert any("sizes only" in w for w in report.warnings)
+
+
+@pytest.mark.skipif(shutil.which("php") is None, reason="php not installed")
+def test_php_scan_bridge_returns_sha1_for_small_files_only(tmp_path):
+    import hashlib
+
+    from deployctl.zip_deploy import generate_php_scan_script
+
+    site = tmp_path / "site"
+    (site / "app").mkdir(parents=True)
+    (site / "app" / "small.txt").write_text("hello")
+    (site / "big.bin").write_bytes(b"x" * 50)
+    (site / "scan.php").write_text(generate_php_scan_script("tok", hash_max_bytes=10))
+
+    out = subprocess.run(
+        ["php", "-r", '$_GET["token"]="tok"; include "scan.php";'],
+        cwd=site, capture_output=True, text=True, check=True,
+    ).stdout
+    files = json.loads(out)["files"]
+    assert files["app/small.txt"]["sha1"] == hashlib.sha1(b"hello").hexdigest()
+    assert "sha1" not in files["big.bin"]

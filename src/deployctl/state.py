@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from deployctl.diff import LocalFileInfo, file_sha1
+
 STATE_DIR = Path.home() / ".deployctl" / "state"
 
 
@@ -59,9 +61,11 @@ def save_deployment_state(
     for rel_path, info in local_files.items():
         size = getattr(info, "size", None) if not isinstance(info, dict) else info.get("size")
         mtime = getattr(info, "mtime", None) if not isinstance(info, dict) else info.get("mtime")
+        sha1 = file_sha1(info) if isinstance(info, LocalFileInfo) else (info.get("sha1") if isinstance(info, dict) else None)
         manifest[rel_path] = {
             "size": size,
             "mtime": mtime,
+            "sha1": sha1,
         }
 
     for rel_path in extra_files or []:

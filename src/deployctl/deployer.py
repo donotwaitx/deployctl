@@ -832,6 +832,11 @@ def _run_deployment(
 
         report.diff_source = "php_bridge" if scanned_via_bridge else "ftp_scan"
         if not scanned_via_bridge:
+            report.warnings.append(
+                f"The {protocol.upper()} scan compares file sizes only, so an edit that keeps the byte count is not detected. "
+                "Set app_url on the target to scan with content hashes."
+            )
+        if not scanned_via_bridge:
             # Fallback to standard sequential FTP traversal
             with console.status(f"[bold cyan]Scanning remote files via {protocol.upper()}..."):
                 try:

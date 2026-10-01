@@ -18,6 +18,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Callable
 
+from deployctl.diff import HASH_MAX_BYTES
+
 
 def generate_php_bridge_script(token: str, zip_filename: str) -> str:
     """Generate self-destructing PHP extraction script."""
@@ -234,8 +236,11 @@ def trigger_remote_extraction(
     return False, f"Failed to connect to extraction endpoint ({target_url}): {last_error}", {}
 
 
-def generate_php_scan_script(token: str) -> str:
-    """Generate self-destructing PHP remote manifest scanner script."""
+def generate_php_scan_script(token: str, hash_max_bytes: int = HASH_MAX_BYTES) -> str:
+    """Generate self-destructing PHP remote manifest scanner script.
+
+    Files up to `hash_max_bytes` are listed with their `sha1`, so the diff can compare content.
+    """
     return f"""<?php
 /**
  * deployctl Fast Remote Manifest Scanner Bridge
@@ -281,10 +286,18 @@ try {{
                 }}
                 $relPath = substr($fullPath, strlen($baseDir) + 1);
                 $relPath = str_replace('\\\\', '/', $relPath);
-                $files[$relPath] = [
-                    'size' => $item->getSize(),
+                $size = $item->getSize();
+                $entry = [
+                    'size' => $size,
                     'mtime' => $item->getMTime(),
                 ];
+                if ($size <= {hash_max_bytes}) {{
+                    $hash = sha1_file($fullPath);
+                    if (is_string($hash)) {{
+                        $entry['sha1'] = $hash;
+                    }}
+                }}
+                $files[$relPath] = $entry;
             }}
         }} catch (Throwable $e) {{
             continue;
