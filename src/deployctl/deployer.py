@@ -28,12 +28,18 @@ from rich.progress import (
 )
 from rich.prompt import Confirm, Prompt
 
-from deployctl.config import get_project_target, load_global_config, load_projects, save_projects
+from deployctl.config import (
+    DOWNLOADS_DIR,
+    get_project_target,
+    load_global_config,
+    load_projects,
+    save_projects,
+)
 from deployctl.credentials import get_credential
 from deployctl.diff import compute_diff, format_diff_text, scan_local_files
 from deployctl.logger import DeployLogger
 from deployctl.providers import get_provider
-from deployctl.security import check_project_isolation, mask_secret
+from deployctl.security import check_project_isolation, mask_secret, sanitize_text
 from deployctl.state import load_deployment_state, save_deployment_state
 from deployctl.zip_deploy import (
     create_deployment_zip,
@@ -273,6 +279,141 @@ def browse_connection_directories(
             "directories": [],
             "files": [],
         }
+
+
+DEFAULT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+MAX_DOWNLOAD_PREVIEW_BYTES = 64 * 1024
+
+
+def _read_tail_preview(local_file: Path, tail_lines: int) -> str:
+    """Return the last `tail_lines` lines of a downloaded file, secrets redacted.
+
+    Only the last MAX_DOWNLOAD_PREVIEW_BYTES bytes are read, so a huge log cannot flood the agent context.
+    """
+    size = local_file.stat().st_size
+    with open(local_file, "rb") as f:
+        f.seek(max(0, size - MAX_DOWNLOAD_PREVIEW_BYTES))
+        raw = f.read()
+    text = raw.decode("utf-8", errors="replace")
+    return sanitize_text("\n".join(text.splitlines()[-tail_lines:]))
+
+
+def download_connection_file(
+    host: str,
+    username: str,
+    remote_path: str,
+    password: str | None = None,
+    protocol: str = "ftp",
+    port: int | None = None,
+    key_path: str | None = None,
+    download_dir: Path | None = None,
+    tail_lines: int = 200,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+) -> dict[str, Any]:
+    """Download one remote file into `download_dir`, mirroring its remote path.
+
+    The local destination is always derived from `remote_path` under `download_dir` (never chosen by the
+    caller), so a download cannot overwrite files elsewhere on this machine. Refuses directories and files
+    larger than `max_bytes`.
+    """
+    proto = protocol or "ftp"
+    clean = (remote_path or "").strip()
+    if not clean or clean.endswith("/"):
+        return {"ok": False, "message": "remote_path must point to a file, not a directory"}
+    if not clean.startswith("/"):
+        clean = "/" + clean
+    clean = posixpath.normpath(clean)
+    if clean == "/":
+        return {"ok": False, "message": "remote_path must point to a file, not a directory"}
+
+    root = (download_dir or DOWNLOADS_DIR).expanduser().resolve()
+    local_file = (root / clean.lstrip("/")).resolve()
+    if root not in local_file.parents:
+        return {"ok": False, "message": f"Refusing to write outside {root}"}
+
+    provider = get_provider(
+        protocol=proto,
+        host=host,
+        username=username,
+        password=password,
+        port=port,
+        key_path=key_path,
+        remote_path="/",
+    )
+
+    try:
+        provider.connect()
+        name = posixpath.basename(clean)
+        entry = next(
+            (i for i in provider.list_dir(posixpath.dirname(clean) or "/") if i["name"] == name),
+            None,
+        )
+        if entry is None:
+            return {"ok": False, "message": f"Remote file not found: {clean}"}
+        if entry["is_dir"]:
+            return {"ok": False, "message": f"{clean} is a directory; use browse_remote_directories"}
+        if entry["size"] > max_bytes:
+            return {
+                "ok": False,
+                "message": f"{clean} is {entry['size']} bytes, over the {max_bytes} byte limit",
+            }
+
+        if not provider.download_file(clean.lstrip("/"), local_file):
+            return {"ok": False, "message": f"Download failed: {clean}"}
+
+        size = local_file.stat().st_size
+        result: dict[str, Any] = {
+            "ok": True,
+            "remote_path": clean,
+            "local_path": str(local_file),
+            "size": size,
+        }
+        if tail_lines > 0:
+            result["tail_lines"] = tail_lines
+            result["preview"] = _read_tail_preview(local_file, tail_lines)
+        return result
+    except Exception as e:
+        return {"ok": False, "message": f"Remote download error ({proto.upper()}): {sanitize_text(str(e))}"}
+    finally:
+        provider.close()
+
+
+def download_target_file(
+    project: str,
+    environment: str = "production",
+    remote_path: str = "",
+    tail_lines: int = 200,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+) -> dict[str, Any]:
+    """Download a file from a configured target using its Keychain credentials.
+
+    Files land in ~/.deployctl/downloads/<project>/<environment>/<remote path>.
+    """
+    try:
+        env_cfg = get_project_target(project, environment)
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+    cred_name = env_cfg.get("credential")
+    if not cred_name:
+        return {"ok": False, "message": f"No credential configured for {project}:{environment}"}
+
+    cred = get_credential(cred_name)
+    if not cred:
+        return {"ok": False, "message": f"Credential '{cred_name}' not found in macOS Keychain"}
+
+    return download_connection_file(
+        host=cred.get("host") or env_cfg.get("host", ""),
+        username=cred.get("username") or env_cfg.get("username", ""),
+        password=cred.get("password"),
+        protocol=env_cfg.get("protocol", cred.get("protocol") or "ftp"),
+        port=cred.get("port") or env_cfg.get("port"),
+        key_path=cred.get("key_path") or env_cfg.get("key_path"),
+        remote_path=remote_path,
+        download_dir=DOWNLOADS_DIR / project / environment,
+        tail_lines=tail_lines,
+        max_bytes=max_bytes,
+    )
 
 
 def create_target_directory(

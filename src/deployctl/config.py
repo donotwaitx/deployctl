@@ -16,6 +16,7 @@ DEPLOYCTL_HOME = Path.home() / ".deployctl"
 GLOBAL_CONFIG_FILE = DEPLOYCTL_HOME / "config.yaml"
 PROJECTS_FILE = DEPLOYCTL_HOME / "projects.yaml"
 LOGS_DIR = DEPLOYCTL_HOME / "logs"
+DOWNLOADS_DIR = DEPLOYCTL_HOME / "downloads"
 
 DEFAULT_EXCLUDES = [
     ".git*",

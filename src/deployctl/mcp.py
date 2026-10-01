@@ -14,6 +14,7 @@ from deployctl.config import load_projects, save_projects
 from deployctl.credentials import get_credential
 from deployctl.deployer import (
     browse_target_directories,
+    download_target_file,
     get_sanitized_config,
     run_deployment,
     test_target_connection,
@@ -129,6 +130,39 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "download_remote_file",
+        "description": "Download one file (e.g. storage/logs/laravel.log) from the remote server using Keychain credentials. The file is saved under ~/.deployctl/downloads/<project>/<environment>/ (the response gives local_path, readable with a file tool) and the last lines are returned inline with secrets redacted. Refuses directories and files over max_bytes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Project name (e.g. my-webapp)",
+                },
+                "environment": {
+                    "type": "string",
+                    "description": "Environment name (default: production)",
+                    "default": "production",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "description": "Absolute remote file path, as shown by browse_remote_directories",
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "description": "Return this many trailing lines inline (0 = save only, no preview)",
+                    "default": 200,
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Refuse files larger than this many bytes (default 52428800 = 50 MB)",
+                    "default": 52428800,
+                },
+            },
+            "required": ["project", "remote_path"],
+        },
+    },
+    {
         "name": "set_remote_path",
         "description": "Configure the remote deployment destination directory (remote_path) for a project and environment in projects.yaml.",
         "inputSchema": {
@@ -217,6 +251,19 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
             environment = arguments.get("environment", "production")
             path = arguments.get("path", "/")
             res = browse_target_directories(project, environment, path)
+            return {
+                "content": [{"type": "text", "text": json.dumps(res, indent=2)}],
+                "isError": not res.get("ok", True),
+            }
+
+        elif tool_name == "download_remote_file":
+            res = download_target_file(
+                arguments.get("project", ""),
+                arguments.get("environment", "production"),
+                arguments.get("remote_path", ""),
+                tail_lines=int(arguments.get("tail_lines", 200)),
+                max_bytes=int(arguments.get("max_bytes", 52428800)),
+            )
             return {
                 "content": [{"type": "text", "text": json.dumps(res, indent=2)}],
                 "isError": not res.get("ok", True),
