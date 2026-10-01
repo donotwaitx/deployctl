@@ -317,3 +317,12 @@ def test_mcp_set_remote_path_edits_the_global_registry_not_a_local_override(tmp_
     assert result["isError"] is False
     text = registry.read_text()
     assert "/new" in text and "other" not in text
+
+
+def test_php_scan_bridge_skips_symlinks_and_unreadable_entries():
+    from deployctl.zip_deploy import generate_php_scan_script
+
+    script = generate_php_scan_script("tok")
+    assert "isLink()" in script and "CATCH_GET_CHILD" in script and "catch (Throwable" in script
+    # the PHP source must still hold the Windows path separator replacement it had before
+    assert "str_replace('\\\\', '/'" in script

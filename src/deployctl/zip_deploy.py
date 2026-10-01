@@ -265,20 +265,29 @@ register_shutdown_function(function() {{
 
 try {{
     $dirIter = new RecursiveDirectoryIterator($baseDir, RecursiveDirectoryIterator::SKIP_DOTS);
-    $iter = new RecursiveIteratorIterator($dirIter, RecursiveIteratorIterator::SELF_FIRST);
+    // CATCH_GET_CHILD skips unreadable directories instead of aborting the whole scan
+    $iter = new RecursiveIteratorIterator($dirIter, RecursiveIteratorIterator::SELF_FIRST, RecursiveIteratorIterator::CATCH_GET_CHILD);
 
     foreach ($iter as $item) {{
-        if ($item->isFile()) {{
-            $fullPath = $item->getPathname();
-            if ($fullPath === __FILE__) {{
+        try {{
+            // Symlinks (e.g. Laravel's public/storage) may point outside open_basedir; they are not deployed files
+            if ($item->isLink()) {{
                 continue;
             }}
-            $relPath = substr($fullPath, strlen($baseDir) + 1);
-            $relPath = str_replace('\\\\', '/', $relPath);
-            $files[$relPath] = [
-                'size' => $item->getSize(),
-                'mtime' => $item->getMTime(),
-            ];
+            if ($item->isFile()) {{
+                $fullPath = $item->getPathname();
+                if ($fullPath === __FILE__) {{
+                    continue;
+                }}
+                $relPath = substr($fullPath, strlen($baseDir) + 1);
+                $relPath = str_replace('\\\\', '/', $relPath);
+                $files[$relPath] = [
+                    'size' => $item->getSize(),
+                    'mtime' => $item->getMTime(),
+                ];
+            }}
+        }} catch (Throwable $e) {{
+            continue;
         }}
     }}
 
