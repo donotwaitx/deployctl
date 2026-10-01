@@ -38,7 +38,7 @@ $zipFilename = '{zip_filename}';
 
 $providedToken = isset($_GET['token']) ? $_GET['token'] : (isset($_POST['token']) ? $_POST['token'] : '');
 
-if (empty($providedToken) || $providedToken !== $expectedToken) {{
+if (!is_string($providedToken) || $providedToken === '' || !hash_equals($expectedToken, $providedToken)) {{
     http_response_code(403);
     echo json_encode(['ok' => false, 'message' => 'Invalid or missing authentication token.']);
     exit(1);
@@ -137,6 +137,32 @@ def create_deployment_zip(
     return len(files_to_pack), zip_size
 
 
+def _build_ssl_context(verify_tls: bool) -> ssl.SSLContext:
+    """TLS context for talking to the bridge scripts.
+
+    Certificates are verified unless the target opts out with `insecure_tls: true` (self-signed staging hosts).
+    """
+    ctx = ssl.create_default_context()
+    if not verify_tls:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _candidate_urls(full_url: str, server_ip: str | None, verify_tls: bool) -> list[str]:
+    """The URL to call, plus the same path on the server IP when TLS verification is off.
+
+    The IP fallback exists for hosts whose DNS is not yet pointing at the server. It is skipped when
+    verifying certificates, because a certificate is never valid for a bare IP address.
+    """
+    candidates = [full_url]
+    parsed = urllib.parse.urlparse(full_url)
+    if not verify_tls and server_ip and parsed.hostname != server_ip:
+        port_part = f":{parsed.port}" if parsed.port else ""
+        candidates.append(parsed._replace(netloc=f"{server_ip}{port_part}").geturl())
+    return candidates
+
+
 def _build_smart_request(app_url: str, filename: str, token: str, user_agent: str, server_ip: str | None = None) -> urllib.request.Request:
     clean_url = app_url.rstrip("/")
     target_url = f"{clean_url}/{filename}"
@@ -162,6 +188,7 @@ def trigger_remote_extraction(
     token: str,
     timeout: int = 60,
     server_ip: str | None = None,
+    verify_tls: bool = True,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Send HTTP request to trigger the PHP extraction bridge on the hosting server."""
     clean_url = app_url.rstrip("/")
@@ -172,17 +199,8 @@ def trigger_remote_extraction(
     parsed = urllib.parse.urlparse(full_url)
     original_host = parsed.netloc
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE  # Support self-signed SSL on development/staging domains
-
-    # Build primary and fallback candidate URLs
-    candidate_urls = [full_url]
-    if server_ip and parsed.hostname != server_ip:
-        port_part = f":{parsed.port}" if parsed.port else ""
-        ip_netloc = f"{server_ip}{port_part}"
-        ip_url = parsed._replace(netloc=ip_netloc).geturl()
-        candidate_urls.append(ip_url)
+    ctx = _build_ssl_context(verify_tls)
+    candidate_urls = _candidate_urls(full_url, server_ip, verify_tls)
 
     last_error = ""
     for candidate in candidate_urls:
@@ -231,7 +249,7 @@ error_reporting(0);
 $expectedToken = '{token}';
 $providedToken = isset($_GET['token']) ? $_GET['token'] : (isset($_POST['token']) ? $_POST['token'] : '');
 
-if (empty($providedToken) || $providedToken !== $expectedToken) {{
+if (!is_string($providedToken) || $providedToken === '' || !hash_equals($expectedToken, $providedToken)) {{
     http_response_code(403);
     echo json_encode(['ok' => false, 'message' => 'Invalid or missing authentication token.']);
     exit(1);
@@ -289,6 +307,7 @@ def fetch_remote_manifest(
     token: str,
     timeout: int = 60,
     server_ip: str | None = None,
+    verify_tls: bool = True,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Fetch remote filesystem manifest from the PHP scanner bridge in a single HTTP request."""
     clean_url = app_url.rstrip("/")
@@ -300,17 +319,8 @@ def fetch_remote_manifest(
     parsed = urllib.parse.urlparse(full_url)
     original_host = parsed.netloc
 
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
-    # Build primary and fallback candidate URLs
-    candidate_urls = [full_url]
-    if server_ip and parsed.hostname != server_ip:
-        port_part = f":{parsed.port}" if parsed.port else ""
-        ip_netloc = f"{server_ip}{port_part}"
-        ip_url = parsed._replace(netloc=ip_netloc).geturl()
-        candidate_urls.append(ip_url)
+    ctx = _build_ssl_context(verify_tls)
+    candidate_urls = _candidate_urls(full_url, server_ip, verify_tls)
 
     last_error = ""
     for candidate in candidate_urls:
