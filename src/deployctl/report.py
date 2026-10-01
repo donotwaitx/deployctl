@@ -26,6 +26,7 @@ class DeployReport:
     added: list[str] = field(default_factory=list)
     modified: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    skipped_deletes: list[str] = field(default_factory=list)
     unchanged_count: int = 0
     uploaded: int = 0
     failed_uploads: list[str] = field(default_factory=list)
@@ -42,7 +43,12 @@ class DeployReport:
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready summary; file lists are capped at MAX_LISTED_FILES with a `truncated` flag."""
-        lists = {"added": self.added, "modified": self.modified, "deleted": self.deleted}
+        lists = {
+            "added": self.added,
+            "modified": self.modified,
+            "deleted": self.deleted,
+            "skipped_deletes": self.skipped_deletes,
+        }
         return {
             "status": self.status,
             "ok": self.ok,
@@ -61,9 +67,10 @@ class DeployReport:
                 "unchanged": self.unchanged_count,
                 "uploaded": self.uploaded,
             },
-            "files": {name: files[:MAX_LISTED_FILES] for name, files in lists.items()},
+            "files": {name: lists[name][:MAX_LISTED_FILES] for name in ("added", "modified", "deleted")},
             "truncated": any(len(files) > MAX_LISTED_FILES for files in lists.values()),
             "failed_uploads": self.failed_uploads,
+            "skipped_deletes": self.skipped_deletes[:MAX_LISTED_FILES],
             "failed_deletes": self.failed_deletes,
             "post_deploy_deleted": self.post_deploy_deleted,
             "duration_seconds": round(self.duration_seconds, 2),

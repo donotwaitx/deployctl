@@ -126,11 +126,13 @@ projects:
       post_deploy_delete:             # server files removed after a successful deploy (framework caches)
         - bootstrap/cache/*.php
       insecure_tls: false             # true only for self-signed hosts: skips certificate checks
+      delete_missing: false           # upload-only: never delete files that exist only on the server
 ```
 
 * Every deployment records the git **branch, commit and dirty state**. Without `allowed_branches`, deploying from a branch other than `main` / `master` / `develop` only prints a warning, as does deploying from a different branch than the last deployment (files that exist only in the other branch can linger on the server).
 * Files whose deletion fails are reported, kept in the state cache and retried by the next deployment; deletions never run when an upload failed.
 * The state cache is ignored once it is older than `state_max_age_days` (default 7, in `config.yaml`) and the server is scanned again.
+* **Deleting server files always needs an explicit yes** (`--yes`, or `yes=true` over MCP); until then the run stops with `DELETIONS_NEED_CONFIRMATION` and the list of files. Targets whose server also receives files (admin uploads, generated thumbnails) should set `delete_missing: false`: such files are reported as `skipped_deletes` and never removed.
 * Only one deployment per `project:environment` runs at a time.
 * `post_deploy_delete` patterns are relative to `remote_path`; only the file-name part may contain wildcards.
 

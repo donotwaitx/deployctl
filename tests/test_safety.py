@@ -403,3 +403,43 @@ def test_php_scan_bridge_returns_sha1_for_small_files_only(tmp_path):
     files = json.loads(out)["files"]
     assert files["app/small.txt"]["sha1"] == hashlib.sha1(b"hello").hexdigest()
     assert "sha1" not in files["big.bin"]
+
+
+# --- deletions -------------------------------------------------------------------------------------------
+
+
+def _server_only_upload(target):
+    """A file that exists only on the server, like an image uploaded through the remote admin."""
+    (target.remote / "uploads").mkdir(exist_ok=True)
+    path = target.remote / "uploads" / "from-admin.png"
+    path.write_text("server only")
+    return path
+
+
+def test_deleting_server_files_needs_confirmation_when_not_interactive(target):
+    orphan = _server_only_upload(target)
+
+    ok, report = _deploy(skip_confirm=False, interactive=False)
+    assert not ok and report.status == "DELETIONS_NEED_CONFIRMATION"
+    assert report.deleted == ["uploads/from-admin.png"]  # listed so the caller can review it
+    assert orphan.exists() and not (target.remote / "a.txt").exists()
+
+    ok, report = _deploy(skip_confirm=True, interactive=False)
+    assert ok and not orphan.exists()
+
+
+def test_delete_missing_false_never_removes_server_only_files(target):
+    target.env["delete_missing"] = False
+    orphan = _server_only_upload(target)
+
+    ok, report = _deploy(skip_confirm=False, interactive=False)
+    assert ok and report.status == "SUCCESS"
+    assert orphan.exists() and (target.remote / "a.txt").exists()
+    assert report.skipped_deletes == ["uploads/from-admin.png"] and report.deleted == []
+    assert report.to_dict()["skipped_deletes"] == ["uploads/from-admin.png"]
+    assert any("delete_missing" in w for w in report.warnings)
+
+    # it stays reported on later runs, never deleted
+    (target.local / "b.txt").write_text("b")
+    ok, report = _deploy(skip_confirm=False, interactive=False)
+    assert ok and orphan.exists()

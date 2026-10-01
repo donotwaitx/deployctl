@@ -47,7 +47,7 @@ MCP_TOOLS = [
                 },
                 "yes": {
                     "type": "boolean",
-                    "description": "Confirm a production deployment. Leave false first: the call then returns the diff with status CONFIRMATION_REQUIRED, and you repeat it with yes=true once the diff has been reviewed.",
+                    "description": "Confirm a production deployment. Leave false first: the call then stops with CONFIRMATION_REQUIRED (production) or DELETIONS_NEED_CONFIRMATION (server-only files would be deleted) and returns the diff; repeat it with yes=true once the diff has been reviewed.",
                     "default": False,
                 },
                 "force_branch": {

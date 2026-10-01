@@ -850,6 +850,15 @@ def _run_deployment(
 
         diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
 
+    # `delete_missing: false` makes the target upload-only: files that exist only on the server (admin
+    # uploads, generated files) are reported but never removed
+    if not env_cfg.get("delete_missing", True) and diff.deleted:
+        report.skipped_deletes = list(diff.deleted)
+        diff.deleted = []
+        report.warnings.append(
+            f"{len(report.skipped_deletes)} file(s) exist only on the server and were left alone (delete_missing is false)"
+        )
+
     report.added, report.modified, report.deleted = list(diff.added), list(diff.modified), list(diff.deleted)
     report.unchanged_count = len(diff.unchanged)
 
@@ -879,6 +888,31 @@ def _run_deployment(
 
     total_files = len(diff.upload_files)
     total_mb = round(diff.total_upload_bytes / (1024 * 1024), 2)
+
+    # Deleting server files is the one step that cannot be undone, so it always needs an explicit yes
+    needs_delete_confirm = bool(diff.deleted) and not skip_confirm
+    if needs_delete_confirm and not interactive:
+        provider.close()
+        report.duration_seconds = time.time() - start_time
+        return report.finish(
+            False,
+            "DELETIONS_NEED_CONFIRMATION",
+            f"{len(diff.deleted)} file(s) that exist only on the server would be deleted (see files.deleted). "
+            "Repeat the call with yes=true to delete them, or set delete_missing: false on the target to never delete.",
+        )
+
+    if needs_delete_confirm:
+        shown = "\n".join(f"  - {f}" for f in diff.deleted[:10])
+        more = f"\n  ... and {len(diff.deleted) - 10} more" if len(diff.deleted) > 10 else ""
+        console.print(Panel(f"[bold red]{len(diff.deleted)} file(s) will be deleted from the server:[/bold red]\n{shown}{more}", border_style="red"))
+        try:
+            if not Confirm.ask("Delete them?", default=False):
+                console.print("[yellow]Deployment cancelled by user.[/yellow]")
+                provider.close()
+                return report.finish(False, "CANCELLED", "Deployment cancelled by user")
+        except (KeyboardInterrupt, EOFError):
+            provider.close()
+            return report.finish(False, "CANCELLED", "Deployment cancelled by user")
 
     if needs_confirm and not interactive:
         provider.close()
