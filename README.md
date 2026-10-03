@@ -283,6 +283,15 @@ jobs:
 
 ---
 
+## ☕ Support
+
+If deployctl saves you time, you can support its development:
+
+- **MoMo:** [0336679423](https://nhantien.momo.vn/0336679423)
+- **MB Bank:** `910191005`
+
+<img src="https://img.vietqr.io/image/MB-910191005-compact2.png" alt="VietQR - MB Bank 910191005" width="240">
+
 ## 📄 License
 
 MIT License © 2026 deployctl Contributors. See [LICENSE](LICENSE) for details.
