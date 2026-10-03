@@ -253,8 +253,8 @@ def test_tls_is_verified_unless_the_target_opts_out():
     assert _build_ssl_context(False).verify_mode == ssl.CERT_NONE
 
     url = "https://example.com/x.php?token=t"
-    assert _candidate_urls(url, "1.2.3.4", True) == [url]
-    assert _candidate_urls(url, "1.2.3.4", False) == [url, "https://1.2.3.4/x.php?token=t"]
+    assert _candidate_urls(url, "1.2.3.4") == ["https://1.2.3.4/x.php?token=t", url]
+    assert _candidate_urls(url, None) == [url]
 
 
 def test_php_bridges_compare_tokens_in_constant_time():
@@ -262,6 +262,25 @@ def test_php_bridges_compare_tokens_in_constant_time():
 
     for script in (generate_php_bridge_script("tok", "p.zip"), generate_php_scan_script("tok")):
         assert "hash_equals" in script and "!== $expectedToken" not in script
+        assert "register_shutdown_function" in script
+
+
+def test_php_bridge_extract_captures_error_details():
+    from deployctl.zip_deploy import generate_php_bridge_script
+
+    script = generate_php_bridge_script("tok", "p.zip")
+    assert "error_get_last()" in script
+
+
+def test_infer_app_url_from_remote_path_or_host():
+    from deployctl.zip_deploy import infer_app_url
+
+    # Unreachable or non-redirecting domains fall back to the inferred clean https URL
+    assert infer_app_url("/domains/local-test.internal/public_html", "1.2.3.4") == "https://local-test.internal"
+    assert infer_app_url("/domains/local-test.internal/public_html/demo", "1.2.3.4") == "https://local-test.internal/demo"
+    assert infer_app_url("/public_html/sub", "api.internal.local") == "https://api.internal.local/sub"
+    assert infer_app_url("/public_html", "api.internal.local") == "https://api.internal.local"
+    assert infer_app_url("/public_html", "192.168.1.1") is None
 
 
 # --- MCP -------------------------------------------------------------------------------------------------

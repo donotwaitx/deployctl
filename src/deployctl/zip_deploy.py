@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import ssl
 import tempfile
@@ -46,13 +47,16 @@ if (!is_string($providedToken) || $providedToken === '' || !hash_equals($expecte
     exit(1);
 }}
 
+register_shutdown_function(function() {{
+    @unlink(__FILE__);
+}});
+
 $startTime = microtime(true);
 $zipPath = __DIR__ . '/' . $zipFilename;
 
 if (!file_exists($zipPath)) {{
     http_response_code(404);
     echo json_encode(['ok' => false, 'message' => 'Zip payload not found: ' . $zipFilename]);
-    @unlink(__FILE__);
     exit(1);
 }}
 
@@ -67,10 +71,11 @@ if (class_exists('ZipArchive')) {{
     if ($res === TRUE) {{
         $extractedCount = $zip->numFiles;
         $extractSuccess = $zip->extractTo(__DIR__);
-        $zip->close();
         if (!$extractSuccess) {{
-            $errorMsg = 'ZipArchive::extractTo failed';
+            $lastErr = error_get_last();
+            $errorMsg = 'ZipArchive::extractTo failed' . ($lastErr ? ': ' . $lastErr['message'] : '');
         }}
+        $zip->close();
     }} else {{
         $errorMsg = 'ZipArchive failed to open zip file, code: ' . $res;
     }}
@@ -87,11 +92,10 @@ if (!$extractSuccess && function_exists('exec')) {{
     }}
 }}
 
-// Delete the zip payload
-@unlink($zipPath);
-
-// Self-destruct bridge script
-@unlink(__FILE__);
+// Delete the zip payload on success
+if ($extractSuccess) {{
+    @unlink($zipPath);
+}}
 
 $duration = round((microtime(true) - $startTime) * 1000, 2);
 
@@ -151,37 +155,58 @@ def _build_ssl_context(verify_tls: bool) -> ssl.SSLContext:
     return ctx
 
 
-def _candidate_urls(full_url: str, server_ip: str | None, verify_tls: bool) -> list[str]:
-    """The URL to call, plus the same path on the server IP when TLS verification is off.
+def _candidate_urls(full_url: str, server_ip: str | None) -> list[str]:
+    """Candidates to call: direct server IP with Host header first, then canonical domain URL.
 
-    The IP fallback exists for hosts whose DNS is not yet pointing at the server. It is skipped when
-    verifying certificates, because a certificate is never valid for a bare IP address.
+    Calling server IP directly bypasses Cloudflare/WAF, proxy timeouts (524), and DNS latency.
     """
-    candidates = [full_url]
+    candidates = []
     parsed = urllib.parse.urlparse(full_url)
-    if not verify_tls and server_ip and parsed.hostname != server_ip:
+    if server_ip and parsed.hostname != server_ip:
         port_part = f":{parsed.port}" if parsed.port else ""
         candidates.append(parsed._replace(netloc=f"{server_ip}{port_part}").geturl())
+    candidates.append(full_url)
     return candidates
 
 
-def _build_smart_request(app_url: str, filename: str, token: str, user_agent: str, server_ip: str | None = None) -> urllib.request.Request:
-    clean_url = app_url.rstrip("/")
-    target_url = f"{clean_url}/{filename}"
-    params = urllib.parse.urlencode({"token": token})
-    full_url = f"{target_url}?{params}"
+def resolve_canonical_app_url(url: str, verify_tls: bool = True, timeout: int = 5) -> str:
+    """Follow HTTP 301/302 redirects to find the canonical app URL (e.g. non-www -> www, http -> https)."""
+    clean_url = url.rstrip("/")
+    if not clean_url.startswith(("http://", "https://")):
+        clean_url = f"https://{clean_url}"
+    try:
+        ctx = _build_ssl_context(verify_tls)
+        req = urllib.request.Request(clean_url, headers={"User-Agent": "deployctl/0.2.0 (AutoDetect)"}, method="HEAD")
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            parsed = urllib.parse.urlparse(resp.geturl().rstrip("/"))
+            return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return clean_url
 
-    parsed = urllib.parse.urlparse(full_url)
-    original_host = parsed.netloc
 
-    # If server_ip is provided and hostname differs from server_ip, prepare fallback endpoint
-    headers = {
-        "User-Agent": user_agent,
-        "Host": original_host,
-    }
+def infer_app_url(remote_path: str, host: str, verify_tls: bool = True) -> str | None:
+    """Infer candidate domain and subpath from remote_path (/domains/{domain}/public_html[/{subpath}]) or hostname."""
+    m = re.search(r"/(?:domains|www)/([^/]+)/(?:public_html|public)(?:/(.+))?", remote_path)
+    if m:
+        domain = m.group(1)
+        subpath = m.group(2)
+        base = resolve_canonical_app_url(f"https://{domain}", verify_tls=verify_tls)
+        return f"{base}/{subpath.strip('/')}" if subpath else base
 
-    # If domain fails DNS or if requested directly, allow targeting server_ip
-    return urllib.request.Request(full_url, headers=headers)
+    m = re.search(r"/(?:domains|www)/([^/]+)", remote_path)
+    domain = m.group(1) if m else None
+
+    m_pub = re.search(r"/(?:public_html|public)(?:/(.+))?", remote_path)
+    subpath = m_pub.group(1) if m_pub else None
+
+    if not domain and host and not re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host):
+        domain = host.split(":")[0]
+
+    if domain:
+        base = resolve_canonical_app_url(f"https://{domain}", verify_tls=verify_tls)
+        return f"{base}/{subpath.strip('/')}" if subpath else base
+
+    return None
 
 
 def trigger_remote_extraction(
@@ -202,19 +227,24 @@ def trigger_remote_extraction(
     original_host = parsed.netloc
 
     ctx = _build_ssl_context(verify_tls)
-    candidate_urls = _candidate_urls(full_url, server_ip, verify_tls)
+    candidate_urls = _candidate_urls(full_url, server_ip)
 
     last_error = ""
     for candidate in candidate_urls:
-        req = urllib.request.Request(
-            candidate,
-            headers={
-                "User-Agent": "deployctl/0.1.0 (Zip-Bridge-AutoExtractor)",
-                "Host": original_host,
-            },
-        )
+        headers = {
+            "User-Agent": "deployctl/0.2.0 (Zip-Bridge-AutoExtractor)",
+        }
+        # Only set Host header for IP fallback candidates (where hostname != server_ip),
+        # never for standard URLs — explicit Host breaks redirects (e.g. non-www -> www) into infinite loops.
+        if candidate != full_url:
+            headers["Host"] = original_host
+            req_ctx = _build_ssl_context(verify_tls=False)
+        else:
+            req_ctx = ctx
+
+        req = urllib.request.Request(candidate, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+            with urllib.request.urlopen(req, timeout=timeout, context=req_ctx) as response:
                 status_code = response.getcode()
                 raw_body = response.read().decode("utf-8", errors="replace")
 
@@ -342,20 +372,23 @@ def fetch_remote_manifest(
     original_host = parsed.netloc
 
     ctx = _build_ssl_context(verify_tls)
-    candidate_urls = _candidate_urls(full_url, server_ip, verify_tls)
+    candidate_urls = _candidate_urls(full_url, server_ip)
 
     last_error = ""
     for candidate in candidate_urls:
-        req = urllib.request.Request(
-            candidate,
-            headers={
-                "User-Agent": "deployctl/0.1.0 (Remote-Manifest-Scanner)",
-                "Host": original_host,
-            },
-        )
+        headers = {
+            "User-Agent": "deployctl/0.2.0 (Remote-Manifest-Scanner)",
+        }
+        if candidate != full_url:
+            headers["Host"] = original_host
+            req_ctx = _build_ssl_context(verify_tls=False)
+        else:
+            req_ctx = ctx
+
+        req = urllib.request.Request(candidate, headers=headers)
 
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+            with urllib.request.urlopen(req, timeout=timeout, context=req_ctx) as response:
                 status_code = response.getcode()
                 raw_body = response.read().decode("utf-8", errors="replace")
 

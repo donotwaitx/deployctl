@@ -1,6 +1,6 @@
 [project]
 name = "deployctl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Secure, ultra-fast differential deployment CLI & Model Context Protocol (MCP) server for AI Agents and Developers."
 readme = "README.md"
 license = { text = "MIT" }

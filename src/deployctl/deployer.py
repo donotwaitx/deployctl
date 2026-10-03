@@ -51,6 +51,8 @@ from deployctl.zip_deploy import (
     fetch_remote_manifest,
     generate_php_bridge_script,
     generate_php_scan_script,
+    infer_app_url,
+    resolve_canonical_app_url,
     trigger_remote_extraction,
 )
 
@@ -697,24 +699,30 @@ def _run_deployment(
     remote_path = remote_path_override or env_cfg.get("remote_path", "/")
     report.remote_path = remote_path
 
-    # If in Zip deploy mode and app_url is missing, ask or guess
-    if is_zip_mode and not effective_app_url:
-        guess_url = f"http://{host}"
-        if interactive and sys.stdin.isatty():
+    # Auto-detect or resolve canonical app_url for PHP Bridge
+    if effective_app_url:
+        effective_app_url = resolve_canonical_app_url(effective_app_url, verify_tls=verify_tls)
+    elif is_zip_mode:
+        inferred = infer_app_url(remote_path, host, verify_tls=verify_tls)
+        if inferred:
+            effective_app_url = inferred
+        elif interactive and sys.stdin.isatty():
+            guess_url = f"http://{host}"
             effective_app_url = Prompt.ask(
                 "Enter App Web URL for remote PHP extraction (e.g. https://example.com)",
                 default=guess_url,
             )
-            # Save app_url to projects.yaml for future runs
-            try:
-                pdata = load_projects()
-                if project in pdata.get("projects", {}) and environment in pdata["projects"][project]:
-                    pdata["projects"][project][environment]["app_url"] = effective_app_url
-                    save_projects(pdata)
-            except Exception:
-                pass
         else:
-            effective_app_url = guess_url
+            effective_app_url = f"http://{host}"
+
+    if effective_app_url and effective_app_url != env_cfg.get("app_url"):
+        try:
+            pdata = load_projects()
+            if project in pdata.get("projects", {}) and environment in pdata["projects"][project]:
+                pdata["projects"][project][environment]["app_url"] = effective_app_url
+                save_projects(pdata)
+        except Exception:
+            pass
 
     # Setup logger (passwords strictly sanitized)
     logger = DeployLogger(project, environment, secrets_to_mask=[password] if password else None)
