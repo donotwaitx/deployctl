@@ -16,6 +16,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from deployctl.config import (
+    DELETE_MODES,
     GLOBAL_CONFIG_FILE,
     PROJECTS_FILE,
     init_sample_config,
@@ -127,7 +128,7 @@ def deploy_cmd(
     environment: str = typer.Argument("production", help="Deployment environment (default: production)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Simulate changes without uploading files"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Automatic yes to production confirmation prompt"),
-    force: bool = typer.Option(False, "--force", "-f", help="Bypass project isolation safeguards"),
+    force: bool = typer.Option(False, "--force", "-f", help="Bypass project isolation and the target's allowed_branches / require_clean policy"),
     local_path: Optional[Path] = typer.Option(None, "--local-path", help="Override local directory source"),
     remote_path: Optional[str] = typer.Option(None, "--remote-path", "-r", help="Override destination remote directory on hosting"),
     zip_deploy: Optional[bool] = typer.Option(None, "--zip/--no-zip", "-z", help="Use Zip archive & Remote PHP Auto-Extract Bridge"),
@@ -142,6 +143,7 @@ def deploy_cmd(
             dry_run=dry_run,
             skip_confirm=yes,
             force_project=force,
+            force_branch=force,
             local_path_override=local_path,
             remote_path_override=remote_path,
             zip_deploy=zip_deploy,
@@ -480,8 +482,12 @@ def project_set_cmd(
     local_path: Optional[str] = typer.Option(None, "--local-path", "-l", help="Set local directory path"),
     zip_deploy: Optional[bool] = typer.Option(None, "--zip/--no-zip", "-z", help="Enable/disable Zip & PHP extraction bridge strategy"),
     app_url: Optional[str] = typer.Option(None, "--app-url", "--url", help="Public web URL of the target app for PHP extraction trigger"),
+    delete_missing: Optional[str] = typer.Option(None, "--delete-missing", help="Which server files a deploy may delete: owned (default, only files deployctl deployed), all, or none"),
 ):
-    """Set or update project settings (remote_path, credential, protocol, zip_deploy, app_url) directly via CLI."""
+    """Set or update project settings (remote_path, credential, protocol, zip_deploy, app_url, delete_missing) directly via CLI."""
+    if delete_missing is not None and delete_missing.lower() not in DELETE_MODES:
+        err_console.print(f"[bold red]--delete-missing must be one of: {', '.join(DELETE_MODES)}[/bold red]")
+        raise typer.Exit(code=1)
     data = load_projects()
     if "projects" not in data:
         data["projects"] = {}
@@ -517,6 +523,8 @@ def project_set_cmd(
             data["projects"][project][target_env]["zip_deploy"] = zip_deploy
         if app_url is not None:
             data["projects"][project][target_env]["app_url"] = app_url
+        if delete_missing is not None:
+            data["projects"][project][target_env]["delete_missing"] = delete_missing.lower()
     else:
         env_dict = data["projects"][project][target_env]
         if remote_path is not None:
@@ -531,6 +539,8 @@ def project_set_cmd(
             env_dict["zip_deploy"] = zip_deploy
         if app_url is not None:
             env_dict["app_url"] = app_url
+        if delete_missing is not None:
+            env_dict["delete_missing"] = delete_missing.lower()
 
     save_projects(data)
     curr = data["projects"][project][target_env]

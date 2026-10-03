@@ -6,6 +6,7 @@ production confirmation safeguards, and provider file synchronization.
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 import secrets
 import shutil
@@ -28,18 +29,30 @@ from rich.progress import (
 )
 from rich.prompt import Confirm, Prompt
 
-from deployctl.config import get_project_target, load_global_config, load_projects, save_projects
+from deployctl.config import (
+    DOWNLOADS_DIR,
+    get_project_target,
+    load_global_config,
+    load_projects,
+    normalize_delete_missing,
+    save_projects,
+)
 from deployctl.credentials import get_credential
 from deployctl.diff import compute_diff, format_diff_text, scan_local_files
+from deployctl.gitinfo import evaluate_git_policy, get_git_context
+from deployctl.lock import deploy_lock
 from deployctl.logger import DeployLogger
 from deployctl.providers import get_provider
-from deployctl.security import check_project_isolation, mask_secret
+from deployctl.report import DeployReport
+from deployctl.security import check_project_isolation, mask_secret, sanitize_text
 from deployctl.state import load_deployment_state, save_deployment_state
 from deployctl.zip_deploy import (
     create_deployment_zip,
     fetch_remote_manifest,
     generate_php_bridge_script,
     generate_php_scan_script,
+    infer_app_url,
+    resolve_canonical_app_url,
     trigger_remote_extraction,
 )
 
@@ -275,6 +288,141 @@ def browse_connection_directories(
         }
 
 
+DEFAULT_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+MAX_DOWNLOAD_PREVIEW_BYTES = 64 * 1024
+
+
+def _read_tail_preview(local_file: Path, tail_lines: int) -> str:
+    """Return the last `tail_lines` lines of a downloaded file, secrets redacted.
+
+    Only the last MAX_DOWNLOAD_PREVIEW_BYTES bytes are read, so a huge log cannot flood the agent context.
+    """
+    size = local_file.stat().st_size
+    with open(local_file, "rb") as f:
+        f.seek(max(0, size - MAX_DOWNLOAD_PREVIEW_BYTES))
+        raw = f.read()
+    text = raw.decode("utf-8", errors="replace")
+    return sanitize_text("\n".join(text.splitlines()[-tail_lines:]))
+
+
+def download_connection_file(
+    host: str,
+    username: str,
+    remote_path: str,
+    password: str | None = None,
+    protocol: str = "ftp",
+    port: int | None = None,
+    key_path: str | None = None,
+    download_dir: Path | None = None,
+    tail_lines: int = 200,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+) -> dict[str, Any]:
+    """Download one remote file into `download_dir`, mirroring its remote path.
+
+    The local destination is always derived from `remote_path` under `download_dir` (never chosen by the
+    caller), so a download cannot overwrite files elsewhere on this machine. Refuses directories and files
+    larger than `max_bytes`.
+    """
+    proto = protocol or "ftp"
+    clean = (remote_path or "").strip()
+    if not clean or clean.endswith("/"):
+        return {"ok": False, "message": "remote_path must point to a file, not a directory"}
+    if not clean.startswith("/"):
+        clean = "/" + clean
+    clean = posixpath.normpath(clean)
+    if clean == "/":
+        return {"ok": False, "message": "remote_path must point to a file, not a directory"}
+
+    root = (download_dir or DOWNLOADS_DIR).expanduser().resolve()
+    local_file = (root / clean.lstrip("/")).resolve()
+    if root not in local_file.parents:
+        return {"ok": False, "message": f"Refusing to write outside {root}"}
+
+    provider = get_provider(
+        protocol=proto,
+        host=host,
+        username=username,
+        password=password,
+        port=port,
+        key_path=key_path,
+        remote_path="/",
+    )
+
+    try:
+        provider.connect()
+        name = posixpath.basename(clean)
+        entry = next(
+            (i for i in provider.list_dir(posixpath.dirname(clean) or "/") if i["name"] == name),
+            None,
+        )
+        if entry is None:
+            return {"ok": False, "message": f"Remote file not found: {clean}"}
+        if entry["is_dir"]:
+            return {"ok": False, "message": f"{clean} is a directory; use browse_remote_directories"}
+        if entry["size"] > max_bytes:
+            return {
+                "ok": False,
+                "message": f"{clean} is {entry['size']} bytes, over the {max_bytes} byte limit",
+            }
+
+        if not provider.download_file(clean.lstrip("/"), local_file):
+            return {"ok": False, "message": f"Download failed: {clean}"}
+
+        size = local_file.stat().st_size
+        result: dict[str, Any] = {
+            "ok": True,
+            "remote_path": clean,
+            "local_path": str(local_file),
+            "size": size,
+        }
+        if tail_lines > 0:
+            result["tail_lines"] = tail_lines
+            result["preview"] = _read_tail_preview(local_file, tail_lines)
+        return result
+    except Exception as e:
+        return {"ok": False, "message": f"Remote download error ({proto.upper()}): {sanitize_text(str(e))}"}
+    finally:
+        provider.close()
+
+
+def download_target_file(
+    project: str,
+    environment: str = "production",
+    remote_path: str = "",
+    tail_lines: int = 200,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+) -> dict[str, Any]:
+    """Download a file from a configured target using its Keychain credentials.
+
+    Files land in ~/.deployctl/downloads/<project>/<environment>/<remote path>.
+    """
+    try:
+        env_cfg = get_project_target(project, environment)
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+
+    cred_name = env_cfg.get("credential")
+    if not cred_name:
+        return {"ok": False, "message": f"No credential configured for {project}:{environment}"}
+
+    cred = get_credential(cred_name)
+    if not cred:
+        return {"ok": False, "message": f"Credential '{cred_name}' not found in macOS Keychain"}
+
+    return download_connection_file(
+        host=cred.get("host") or env_cfg.get("host", ""),
+        username=cred.get("username") or env_cfg.get("username", ""),
+        password=cred.get("password"),
+        protocol=env_cfg.get("protocol", cred.get("protocol") or "ftp"),
+        port=cred.get("port") or env_cfg.get("port"),
+        key_path=cred.get("key_path") or env_cfg.get("key_path"),
+        remote_path=remote_path,
+        download_dir=DOWNLOADS_DIR / project / environment,
+        tail_lines=tail_lines,
+        max_bytes=max_bytes,
+    )
+
+
 def create_target_directory(
     project: str,
     environment: str = "production",
@@ -406,6 +554,55 @@ def get_sanitized_config(project: str, environment: str = "production") -> dict[
     return sanitized
 
 
+def _delete_remote_files(provider: Any, rel_paths: list[str]) -> list[str]:
+    """Delete files on the server and return the ones that could not be deleted.
+
+    Providers signal failure by returning False (FTP) or raising, so both count as failures.
+    """
+    failed: list[str] = []
+    for rel_path in rel_paths:
+        try:
+            if not provider.delete_file(rel_path):
+                failed.append(rel_path)
+        except Exception:
+            failed.append(rel_path)
+    return failed
+
+
+def _run_post_deploy_cleanup(provider: Any, remote_path: str, patterns: list[str]) -> list[str]:
+    """Delete server files matching `post_deploy_delete` patterns, e.g. `bootstrap/cache/*.php`.
+
+    Used to drop framework caches that must be rebuilt after new code lands. Only the file-name part may
+    contain wildcards, absolute patterns and `..` are ignored, and directories are never entered.
+
+    Returns:
+        Relative paths that were deleted.
+    """
+    deleted: list[str] = []
+    for pattern in patterns:
+        clean = pattern.strip().replace("\\", "/")
+        directory, _, name_pattern = clean.rpartition("/")
+        if not name_pattern or clean.startswith("/") or ".." in clean.split("/") or any(c in directory for c in "*?["):
+            continue
+
+        base = posixpath.join(remote_path or "/", directory) if directory else (remote_path or "/")
+        try:
+            entries = provider.list_dir(base)
+        except Exception:
+            continue
+
+        for entry in entries:
+            if entry["is_dir"] or not fnmatch.fnmatch(entry["name"], name_pattern):
+                continue
+            rel_path = f"{directory}/{entry['name']}" if directory else entry["name"]
+            try:
+                if provider.delete_file(rel_path):
+                    deleted.append(rel_path)
+            except Exception:
+                pass
+    return deleted
+
+
 def run_deployment(
     project: str,
     environment: str = "production",
@@ -417,8 +614,51 @@ def run_deployment(
     zip_deploy: bool | None = None,
     app_url: str | None = None,
     remote_scan: bool = False,
+    report: DeployReport | None = None,
+    interactive: bool = True,
+    force_branch: bool = False,
 ) -> bool:
-    """Execute end-to-end deployment workflow."""
+    """Execute the end-to-end deployment workflow under a per-target lock.
+
+    Args:
+        report: Filled with the outcome (diff, git state, warnings, failures) for callers that need more
+            than a bool, such as the MCP server.
+        interactive: When False the run never prompts; a production deployment that needs confirmation
+            stops with status CONFIRMATION_REQUIRED instead of reading stdin (which is the MCP channel).
+        force_branch: Deploy even when the target's `allowed_branches` / `require_clean` policy blocks it.
+    """
+    report = report if report is not None else DeployReport()
+    report.project, report.environment, report.dry_run = project, environment, dry_run
+
+    with deploy_lock(project, environment) as acquired:
+        if not acquired:
+            console.print(f"[bold red]Another deployment to {project}:{environment} is already running.[/bold red]")
+            return report.finish(False, "LOCKED", f"Another deployment to {project}:{environment} is already running")
+        try:
+            return _run_deployment(
+                project, environment, dry_run, skip_confirm, force_project, local_path_override,
+                remote_path_override, zip_deploy, app_url, remote_scan, report, interactive, force_branch,
+            )
+        except Exception as e:
+            report.finish(False, "ERROR", sanitize_text(str(e)))
+            raise
+
+
+def _run_deployment(
+    project: str,
+    environment: str,
+    dry_run: bool,
+    skip_confirm: bool,
+    force_project: bool,
+    local_path_override: Path | None,
+    remote_path_override: str | None,
+    zip_deploy: bool | None,
+    app_url: str | None,
+    remote_scan: bool,
+    report: DeployReport,
+    interactive: bool,
+    force_branch: bool,
+) -> bool:
     start_time = time.time()
 
     # 1. Load config
@@ -428,6 +668,7 @@ def run_deployment(
     # Determine zip deploy mode
     is_zip_mode = zip_deploy if zip_deploy is not None else bool(env_cfg.get("zip_deploy", False) or env_cfg.get("strategy") == "zip")
     effective_app_url = app_url or env_cfg.get("app_url")
+    verify_tls = not env_cfg.get("insecure_tls", False)
 
     # 2. Tier 2: Project Isolation Check
     if global_cfg.get("enforce_project_isolation", False) and not force_project:
@@ -435,19 +676,19 @@ def run_deployment(
         if not is_isolated:
             console.print(f"[bold red]⚠ Project Isolation Alert:[/bold red] {iso_msg}")
             console.print("[dim]Use --force to bypass project isolation if intentional.[/dim]")
-            return False
+            return report.finish(False, "ISOLATION_BLOCKED", iso_msg)
 
     # 3. Tier 1: Credential Retrieval from Keychain
     cred_name = env_cfg.get("credential")
     if not cred_name:
         console.print(f"[bold red]Error:[/bold red] No credential identifier defined for {project}:{environment}")
-        return False
+        return report.finish(False, "NO_CREDENTIAL", f"No credential identifier defined for {project}:{environment}")
 
     cred = get_credential(cred_name)
     if not cred:
         console.print(f"[bold red]Error:[/bold red] Credential '{cred_name}' not found in macOS Keychain.")
         console.print(f"[dim]Run: deployctl credential add {cred_name}[/dim]")
-        return False
+        return report.finish(False, "NO_CREDENTIAL", f"Credential '{cred_name}' not found in the keychain")
 
     host = cred.get("host") or env_cfg.get("host", "")
     username = cred.get("username") or env_cfg.get("username", "")
@@ -456,25 +697,32 @@ def run_deployment(
     key_path = cred.get("key_path") or env_cfg.get("key_path")
     protocol = env_cfg.get("protocol", cred.get("protocol") or "ftp")
     remote_path = remote_path_override or env_cfg.get("remote_path", "/")
+    report.remote_path = remote_path
 
-    # If in Zip deploy mode and app_url is missing, ask or guess
-    if is_zip_mode and not effective_app_url:
-        guess_url = f"http://{host}"
-        if sys.stdin.isatty():
+    # Auto-detect or resolve canonical app_url for PHP Bridge
+    if effective_app_url:
+        effective_app_url = resolve_canonical_app_url(effective_app_url, verify_tls=verify_tls)
+    elif is_zip_mode:
+        inferred = infer_app_url(remote_path, host, verify_tls=verify_tls)
+        if inferred:
+            effective_app_url = inferred
+        elif interactive and sys.stdin.isatty():
+            guess_url = f"http://{host}"
             effective_app_url = Prompt.ask(
                 "Enter App Web URL for remote PHP extraction (e.g. https://example.com)",
                 default=guess_url,
             )
-            # Save app_url to projects.yaml for future runs
-            try:
-                pdata = load_projects()
-                if project in pdata.get("projects", {}) and environment in pdata["projects"][project]:
-                    pdata["projects"][project][environment]["app_url"] = effective_app_url
-                    save_projects(pdata)
-            except Exception:
-                pass
         else:
-            effective_app_url = guess_url
+            effective_app_url = f"http://{host}"
+
+    if effective_app_url and effective_app_url != env_cfg.get("app_url"):
+        try:
+            pdata = load_projects()
+            if project in pdata.get("projects", {}) and environment in pdata["projects"][project]:
+                pdata["projects"][project][environment]["app_url"] = effective_app_url
+                save_projects(pdata)
+        except Exception:
+            pass
 
     # Setup logger (passwords strictly sanitized)
     logger = DeployLogger(project, environment, secrets_to_mask=[password] if password else None)
@@ -487,7 +735,30 @@ def run_deployment(
     if not local_dir.exists():
         console.print(f"[bold red]Error:[/bold red] Local path does not exist: {local_dir}")
         logger.error(f"Local path not found: {local_dir}")
-        return False
+        return report.finish(False, "LOCAL_PATH_MISSING", f"Local path does not exist: {local_dir}")
+
+    # Git safeguards: record what is being shipped and check it against the target's policy
+    cached_state = None if remote_scan else load_deployment_state(project, environment)
+    git = get_git_context(local_dir)
+    report.git = git
+    previous_state = load_deployment_state(project, environment) or {}
+    previous_git = (previous_state.get("metadata") or {}).get("git")
+    git_warnings, git_blockers = evaluate_git_policy(git, env_cfg, previous_git)
+    if git.get("available"):
+        logger.info(f"Git: branch={git['branch']} commit={git['commit']} dirty_files={git['dirty_files']}")
+    for message in git_warnings:
+        console.print(f"[yellow]⚠ {message}[/yellow]")
+        logger.warning(message)
+        report.warnings.append(message)
+    for message in git_blockers:
+        blocked = dry_run or force_branch
+        console.print(f"[{'yellow' if blocked else 'bold red'}]{'⚠' if blocked else '✖'} {message}[/]")
+        logger.warning(message)
+        if blocked:
+            report.warnings.append(("Would be blocked: " if dry_run and not force_branch else "Forced: ") + message)
+    if git_blockers and not dry_run and not force_branch:
+        console.print("[dim]Use --force to deploy anyway.[/dim]")
+        return report.finish(False, "GIT_BLOCKED", "; ".join(git_blockers))
 
     # 4. Instantiate Provider
     try:
@@ -503,18 +774,26 @@ def run_deployment(
     except Exception as e:
         console.print(f"[bold red]Provider error:[/bold red] {str(e)}")
         logger.error(f"Provider error: {str(e)}")
-        return False
+        return report.finish(False, "PROVIDER_ERROR", sanitize_text(str(e), [password] if password else None))
 
     # 5. Scan Local Files and Compute Diff
     exclude_patterns = env_cfg.get("exclude", [])
     local_files = scan_local_files(local_dir, exclude_patterns)
 
-    cached_state = None if remote_scan else load_deployment_state(project, environment)
+    max_age_days = global_cfg.get("state_max_age_days", 7)
+    if cached_state and max_age_days:
+        age_days = (time.time() - float(cached_state.get("updated_at") or 0)) / 86400
+        if age_days > max_age_days:
+            message = f"State cache is {age_days:.0f} days old (limit {max_age_days}); scanning the server instead"
+            console.print(f"[yellow]⚠ {message}[/yellow]")
+            report.warnings.append(message)
+            cached_state = None
 
     if cached_state and "files" in cached_state:
         # Instant diff using local state cache (~0.02s)
+        report.diff_source = "state_cache"
         remote_files = cached_state.get("files", {})
-        diff = compute_diff(local_files, remote_files, detect_deletions=True)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
     else:
         remote_files = {}
         scanned_via_bridge = False
@@ -537,6 +816,7 @@ def run_deployment(
                         scan_script_name,
                         token,
                         server_ip=host,
+                        verify_tls=verify_tls,
                     )
 
                     try:
@@ -548,7 +828,10 @@ def run_deployment(
                         remote_files = scan_files
                         scanned_via_bridge = True
                         console.print(f"[dim]✔ Fast remote scan complete: {len(remote_files)} files retrieved via PHP Bridge.[/dim]")
-                except Exception:
+                    else:
+                        report.warnings.append(f"PHP scan bridge failed ({scan_msg}); fell back to a {protocol.upper()} scan")
+                except Exception as e:
+                    report.warnings.append(f"PHP scan bridge failed ({sanitize_text(str(e))}); fell back to a {protocol.upper()} scan")
                     scanned_via_bridge = False
                 finally:
                     if temp_scan_file.exists():
@@ -557,6 +840,12 @@ def run_deployment(
                         except Exception:
                             pass
 
+        report.diff_source = "php_bridge" if scanned_via_bridge else "ftp_scan"
+        if not scanned_via_bridge:
+            report.warnings.append(
+                f"The {protocol.upper()} scan compares file sizes only, so an edit that keeps the byte count is not detected. "
+                "Set app_url on the target to scan with content hashes."
+            )
         if not scanned_via_bridge:
             # Fallback to standard sequential FTP traversal
             with console.status(f"[bold cyan]Scanning remote files via {protocol.upper()}..."):
@@ -567,9 +856,26 @@ def run_deployment(
                     provider.close()
                     console.print(f"[bold red]Connection failed:[/bold red] {str(e)}")
                     logger.error(f"Connection failed: {str(e)}")
-                    return False
+                    return report.finish(False, "CONNECTION_FAILED", sanitize_text(str(e), [password] if password else None))
 
-        diff = compute_diff(local_files, remote_files, detect_deletions=True)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
+
+    # Server files take priority: by default only files deployctl deployed earlier (the state manifest) may be
+    # deleted. Files that exist only on the server (admin uploads, generated files) are reported, never removed.
+    delete_mode = normalize_delete_missing(env_cfg.get("delete_missing"))
+    if diff.deleted and delete_mode != "all":
+        owned = set(previous_state.get("files", {})) if delete_mode == "owned" else set()
+        deletable = [f for f in diff.deleted if f in owned]
+        report.skipped_deletes = [f for f in diff.deleted if f not in owned]
+        diff.deleted = deletable
+        if report.skipped_deletes:
+            reason = "delete_missing is none" if delete_mode == "none" else "deployctl did not deploy them"
+            report.warnings.append(
+                f"{len(report.skipped_deletes)} file(s) exist only on the server and were left alone ({reason})"
+            )
+
+    report.added, report.modified, report.deleted = list(diff.added), list(diff.modified), list(diff.deleted)
+    report.unchanged_count = len(diff.unchanged)
 
     # 6. Dry Run Check
     if dry_run:
@@ -579,15 +885,17 @@ def run_deployment(
             console.print(f"[dim]Strategy: Zip & Remote PHP Bridge (Target URL: {effective_app_url})[/dim]")
         provider.close()
         logger.info(f"Dry run complete. Target: {remote_path}. Added: {len(diff.added)}, Modified: {len(diff.modified)}, Deleted: {len(diff.deleted)}")
-        return True
+        report.duration_seconds = time.time() - start_time
+        return report.finish(True, "DRY_RUN", "Dry run only; nothing was uploaded")
 
     # Check if there are changes to deploy
     if not diff.has_changes:
         console.print(f"[green]✔ Everything is up to date.[/green] Working tree matches remote ({remote_path}). No upload needed.")
         provider.close()
-        save_deployment_state(project, environment, local_files, metadata={"strategy": "zip" if is_zip_mode else "standard"})
+        save_deployment_state(project, environment, local_files, metadata={"strategy": "zip" if is_zip_mode else "standard", "git": git})
         logger.finalize("SUCCESS_NO_CHANGES", 0, time.time() - start_time)
-        return True
+        report.duration_seconds = time.time() - start_time
+        return report.finish(True, "UP_TO_DATE", "Everything is up to date; nothing was uploaded")
 
     # 7. Tier 3: Production Confirmation Safeguard
     is_prod = environment.lower() == "production"
@@ -595,6 +903,40 @@ def run_deployment(
 
     total_files = len(diff.upload_files)
     total_mb = round(diff.total_upload_bytes / (1024 * 1024), 2)
+
+    # Deleting server files is the one step that cannot be undone, so it always needs an explicit yes
+    needs_delete_confirm = bool(diff.deleted) and not skip_confirm
+    if needs_delete_confirm and not interactive:
+        provider.close()
+        report.duration_seconds = time.time() - start_time
+        return report.finish(
+            False,
+            "DELETIONS_NEED_CONFIRMATION",
+            f"{len(diff.deleted)} file(s) that exist only on the server would be deleted (see files.deleted). "
+            "Repeat the call with yes=true to delete them, or set delete_missing: none on the target to never delete.",
+        )
+
+    if needs_delete_confirm:
+        shown = "\n".join(f"  - {f}" for f in diff.deleted[:10])
+        more = f"\n  ... and {len(diff.deleted) - 10} more" if len(diff.deleted) > 10 else ""
+        console.print(Panel(f"[bold red]{len(diff.deleted)} file(s) will be deleted from the server:[/bold red]\n{shown}{more}", border_style="red"))
+        try:
+            if not Confirm.ask("Delete them?", default=False):
+                console.print("[yellow]Deployment cancelled by user.[/yellow]")
+                provider.close()
+                return report.finish(False, "CANCELLED", "Deployment cancelled by user")
+        except (KeyboardInterrupt, EOFError):
+            provider.close()
+            return report.finish(False, "CANCELLED", "Deployment cancelled by user")
+
+    if needs_confirm and not interactive:
+        provider.close()
+        report.duration_seconds = time.time() - start_time
+        return report.finish(
+            False,
+            "CONFIRMATION_REQUIRED",
+            "Production deployment needs confirmation. Review the diff, then repeat the call with yes=true.",
+        )
 
     if needs_confirm:
         mode_label = "Zip & PHP Extract" if is_zip_mode else "Direct File Sync"
@@ -616,11 +958,13 @@ def run_deployment(
                 console.print("[yellow]Deployment cancelled by user.[/yellow]")
                 logger.warning("Deployment aborted at confirmation prompt.")
                 provider.close()
-                return False
+                return report.finish(False, "CANCELLED", "Deployment cancelled by user")
         except (KeyboardInterrupt, EOFError):
             console.print("\n[yellow]Deployment cancelled.[/yellow]")
             provider.close()
-            return False
+            return report.finish(False, "CANCELLED", "Deployment cancelled by user")
+
+    post_deploy_patterns = env_cfg.get("post_deploy_delete") or []
 
     # 8. Upload files: Mode A (Zip & PHP Bridge) or Mode B (Standard FTP)
     if is_zip_mode:
@@ -633,6 +977,8 @@ def run_deployment(
         bridge_name = f"_deployctl_ext_{token[:8]}.php"
         local_zip = temp_dir / zip_name
         local_bridge = temp_dir / bridge_name
+        extract_ok, extract_msg = False, ""
+        zip_size = 0
 
         try:
             with console.status(f"[bold cyan]Packaging {total_files} files into zip archive ({zip_name})..."):
@@ -670,37 +1016,42 @@ def run_deployment(
                     bridge_name,
                     token,
                     server_ip=host,
+                    verify_tls=verify_tls,
                 )
 
-            # Handle deletions if any
-            for del_rel in diff.deleted:
-                try:
-                    provider.delete_file(del_rel)
-                except Exception:
-                    pass
+            # Only touch the server further when the new files really landed
+            if extract_ok:
+                report.failed_deletes = _delete_remote_files(provider, diff.deleted)
+                if post_deploy_patterns:
+                    report.post_deploy_deleted = _run_post_deploy_cleanup(provider, remote_path, post_deploy_patterns)
 
             # Cleanup remote leftovers just in case
-            try:
-                provider.delete_file(zip_name)
-                provider.delete_file(bridge_name)
-            except Exception:
-                pass
+            _delete_remote_files(provider, [zip_name, bridge_name])
 
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
             provider.close()
 
         duration = time.time() - start_time
+        report.duration_seconds = duration
         if not extract_ok:
             console.print(f"[bold red]✖ Remote extraction failed:[/bold red] {extract_msg}")
             console.print(f"[dim]Endpoint: {effective_app_url.rstrip('/')}/{bridge_name}[/dim]")
             logger.finalize("FAILED_ZIP_EXTRACT", 0, duration, {"error": extract_msg, "url": effective_app_url})
-            return False
+            return report.finish(False, "FAILED_ZIP_EXTRACT", f"Remote extraction failed: {extract_msg}")
 
+        report.uploaded = total_files
+        if report.failed_deletes:
+            report.warnings.append(f"{len(report.failed_deletes)} file(s) could not be deleted on the server; the next deployment will retry")
+            console.print(f"[yellow]⚠ {len(report.failed_deletes)} file(s) could not be deleted on the server.[/yellow]")
         console.print(f"\n[bold green]✔ Deployment successful (Zip & PHP Bridge)![/bold green] {total_files} files extracted in {duration:.1f}s.")
-        save_deployment_state(project, environment, local_files, metadata={"strategy": "zip", "app_url": effective_app_url})
+        save_deployment_state(
+            project, environment, local_files,
+            metadata={"strategy": "zip", "app_url": effective_app_url, "git": git},
+            extra_files=report.failed_deletes,
+        )
         logger.finalize("SUCCESS_ZIP", total_files, duration, {"zip_size": zip_size, "app_url": effective_app_url})
-        return True
+        return report.finish(True, "SUCCESS_ZIP" if not report.failed_deletes else "SUCCESS_WITH_WARNINGS", f"{total_files} files extracted")
 
     # Standard file-by-file upload with progress bar
     console.print(f"\n[bold green]Deploying {total_files} files to {project}:{environment}...[/bold green]")
@@ -737,15 +1088,18 @@ def run_deployment(
             finally:
                 progress.remove_task(file_task)
 
-    # Handle deleted files
-    for del_rel in diff.deleted:
-        try:
-            provider.delete_file(del_rel)
-        except Exception:
-            pass
+    report.uploaded = success_count
+    report.failed_uploads = failed_files
+
+    # Deletions and cache cleanup only after every upload succeeded, so a broken deploy never removes files
+    if not failed_files:
+        report.failed_deletes = _delete_remote_files(provider, diff.deleted)
+        if post_deploy_patterns:
+            report.post_deploy_deleted = _run_post_deploy_cleanup(provider, remote_path, post_deploy_patterns)
 
     provider.close()
     duration = time.time() - start_time
+    report.duration_seconds = duration
 
     # 9. Results Summary
     if failed_files:
@@ -753,9 +1107,17 @@ def run_deployment(
         for f in failed_files[:5]:
             console.print(f"  [red]✖ {f}[/red]")
         logger.finalize("FAILED_PARTIAL", success_count, duration, {"failed": failed_files})
-        return False
+        return report.finish(False, "FAILED_PARTIAL", f"{len(failed_files)} file(s) failed to upload; deletions were skipped")
+
+    if report.failed_deletes:
+        report.warnings.append(f"{len(report.failed_deletes)} file(s) could not be deleted on the server; the next deployment will retry")
+        console.print(f"[yellow]⚠ {len(report.failed_deletes)} file(s) could not be deleted on the server.[/yellow]")
 
     console.print(f"\n[bold green]✔ Deployment successful![/bold green] {success_count} files uploaded in {duration:.1f}s.")
-    save_deployment_state(project, environment, local_files, metadata={"strategy": "standard"})
+    save_deployment_state(
+        project, environment, local_files,
+        metadata={"strategy": "standard", "git": git},
+        extra_files=report.failed_deletes,
+    )
     logger.finalize("SUCCESS", success_count, duration, {"uploaded_bytes": diff.total_upload_bytes})
-    return True
+    return report.finish(True, "SUCCESS" if not report.failed_deletes else "SUCCESS_WITH_WARNINGS", f"{success_count} files uploaded")

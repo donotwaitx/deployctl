@@ -289,3 +289,39 @@ def test_deployment_state_cache(monkeypatch, tmp_path):
 
 
 
+
+
+def test_download_connection_file(tmp_path):
+    from deployctl.deployer import download_connection_file
+
+    remote = tmp_path / "remote"
+    (remote / "storage" / "logs").mkdir(parents=True)
+    log = remote / "storage" / "logs" / "laravel.log"
+    log.write_text("\n".join(f"line {i}" for i in range(500)) + "\nconnect ftp://u:hunter22@host/x\n")
+    downloads = tmp_path / "downloads"
+
+    res = download_connection_file(
+        host="", username="", protocol="local",
+        remote_path=str(log), download_dir=downloads, tail_lines=3,
+    )
+    assert res["ok"] is True
+    assert (downloads / str(log).lstrip("/")).read_text() == log.read_text()
+    assert res["preview"].splitlines()[0] == "line 498"
+    assert "hunter22" not in res["preview"]
+
+    # Directories, missing files, oversize files and traversal are refused
+    assert download_connection_file(host="", username="", protocol="local",
+                                    remote_path=str(log.parent), download_dir=downloads)["ok"] is False
+    assert download_connection_file(host="", username="", protocol="local",
+                                    remote_path=str(remote / "nope.log"), download_dir=downloads)["ok"] is False
+    assert download_connection_file(host="", username="", protocol="local",
+                                    remote_path=str(log), download_dir=downloads, max_bytes=10)["ok"] is False
+    res = download_connection_file(host="", username="", protocol="local",
+                                   remote_path=f"{remote}/storage/../../../etc/hosts", download_dir=downloads)
+    assert res["ok"] is False
+
+
+def test_mcp_lists_download_tool():
+    from deployctl.mcp import MCP_TOOLS
+
+    assert "download_remote_file" in [t["name"] for t in MCP_TOOLS]

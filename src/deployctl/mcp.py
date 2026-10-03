@@ -10,19 +10,35 @@ import json
 import sys
 from typing import Any
 
-from deployctl.config import load_projects, save_projects
+from rich.console import Console
+
+from deployctl.config import DELETE_MODES, PROJECTS_FILE, load_projects, save_projects
 from deployctl.credentials import get_credential
+from deployctl import deployer
 from deployctl.deployer import (
     browse_target_directories,
+    download_target_file,
     get_sanitized_config,
     run_deployment,
     test_target_connection,
 )
+from deployctl.report import DeployReport
+
+# Target options `set_target_option` may change, with the check each value must pass
+TARGET_OPTIONS = {
+    "delete_missing": lambda v: isinstance(v, str) and v.lower() in DELETE_MODES,
+    "allowed_branches": lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v),
+    "require_clean": lambda v: isinstance(v, bool),
+    "insecure_tls": lambda v: isinstance(v, bool),
+    "post_deploy_delete": lambda v: isinstance(v, list) and all(isinstance(x, str) and x for x in v),
+    "app_url": lambda v: isinstance(v, str) and v.startswith(("http://", "https://")),
+    "zip_deploy": lambda v: isinstance(v, bool),
+}
 
 MCP_TOOLS = [
     {
         "name": "deploy_project",
-        "description": "Deploy project files to a remote server using credentials securely loaded from macOS Keychain / Linux SecretService / Vault. Never requires or exposes passwords.",
+        "description": "Deploy project files to a remote server using credentials securely loaded from macOS Keychain / Linux SecretService / Vault. Never requires or exposes passwords. Returns a JSON report: status, git branch/commit, warnings, added/modified/deleted files and any failed uploads or deletes.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -42,8 +58,18 @@ MCP_TOOLS = [
                 },
                 "yes": {
                     "type": "boolean",
-                    "description": "Confirm production deployment automatically",
-                    "default": True,
+                    "description": "Confirm a production deployment. Leave false first: the call then stops with CONFIRMATION_REQUIRED (production) or DELETIONS_NEED_CONFIRMATION (server-only files would be deleted) and returns the diff; repeat it with yes=true once the diff has been reviewed.",
+                    "default": False,
+                },
+                "force_branch": {
+                    "type": "boolean",
+                    "description": "Deploy even when the target's allowed_branches / require_clean policy blocks it",
+                    "default": False,
+                },
+                "remote_scan": {
+                    "type": "boolean",
+                    "description": "Compare against a fresh scan of the server instead of the local state cache",
+                    "default": False,
                 },
                 "zip_deploy": {
                     "type": "boolean",
@@ -129,6 +155,53 @@ MCP_TOOLS = [
         },
     },
     {
+        "name": "download_remote_file",
+        "description": "Download one file (e.g. storage/logs/laravel.log) from the remote server using Keychain credentials. The file is saved under ~/.deployctl/downloads/<project>/<environment>/ (the response gives local_path, readable with a file tool) and the last lines are returned inline with secrets redacted. Refuses directories and files over max_bytes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {
+                    "type": "string",
+                    "description": "Project name (e.g. my-webapp)",
+                },
+                "environment": {
+                    "type": "string",
+                    "description": "Environment name (default: production)",
+                    "default": "production",
+                },
+                "remote_path": {
+                    "type": "string",
+                    "description": "Absolute remote file path, as shown by browse_remote_directories",
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "description": "Return this many trailing lines inline (0 = save only, no preview)",
+                    "default": 200,
+                },
+                "max_bytes": {
+                    "type": "integer",
+                    "description": "Refuse files larger than this many bytes (default 52428800 = 50 MB)",
+                    "default": 52428800,
+                },
+            },
+            "required": ["project", "remote_path"],
+        },
+    },
+    {
+        "name": "set_target_option",
+        "description": "Change one safety/behaviour option of an existing deployment target in projects.yaml. Options: delete_missing (owned = default, only delete files deployctl itself deployed; all; none), allowed_branches (list of branch names), require_clean (bool), insecure_tls (bool), post_deploy_delete (list of file patterns), app_url (string), zip_deploy (bool).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Project name"},
+                "environment": {"type": "string", "description": "Environment name (default: production)", "default": "production"},
+                "option": {"type": "string", "enum": sorted(TARGET_OPTIONS), "description": "Option to change"},
+                "value": {"description": "New value; null removes the option so the default applies"},
+            },
+            "required": ["project", "option"],
+        },
+    },
+    {
         "name": "set_remote_path",
         "description": "Configure the remote deployment destination directory (remote_path) for a project and environment in projects.yaml.",
         "inputSchema": {
@@ -191,24 +264,21 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
             return {"content": [{"type": "text", "text": json.dumps(cfg, indent=2)}]}
 
         elif tool_name == "deploy_project":
-            project = arguments.get("project", "")
-            environment = arguments.get("environment", "production")
-            dry_run = arguments.get("dry_run", False)
-            yes = arguments.get("yes", True)
-            zip_deploy = arguments.get("zip_deploy")
-            app_url = arguments.get("app_url")
-
+            report = DeployReport()
             ok = run_deployment(
-                project=project,
-                environment=environment,
-                dry_run=dry_run,
-                skip_confirm=yes,
-                zip_deploy=zip_deploy,
-                app_url=app_url,
+                project=arguments.get("project", ""),
+                environment=arguments.get("environment", "production"),
+                dry_run=arguments.get("dry_run", False),
+                skip_confirm=arguments.get("yes", False),
+                zip_deploy=arguments.get("zip_deploy"),
+                app_url=arguments.get("app_url"),
+                remote_scan=arguments.get("remote_scan", False),
+                force_branch=arguments.get("force_branch", False),
+                report=report,
+                interactive=False,  # stdin is the JSON-RPC channel: never prompt
             )
-            status_text = "DRY RUN COMPLETED" if dry_run else ("DEPLOYMENT SUCCESSFUL" if ok else "DEPLOYMENT FAILED")
             return {
-                "content": [{"type": "text", "text": status_text}],
+                "content": [{"type": "text", "text": json.dumps(report.to_dict(), indent=2)}],
                 "isError": not ok,
             }
 
@@ -222,6 +292,44 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
                 "isError": not res.get("ok", True),
             }
 
+        elif tool_name == "download_remote_file":
+            res = download_target_file(
+                arguments.get("project", ""),
+                arguments.get("environment", "production"),
+                arguments.get("remote_path", ""),
+                tail_lines=int(arguments.get("tail_lines", 200)),
+                max_bytes=int(arguments.get("max_bytes", 52428800)),
+            )
+            return {
+                "content": [{"type": "text", "text": json.dumps(res, indent=2)}],
+                "isError": not res.get("ok", True),
+            }
+
+        elif tool_name == "set_target_option":
+            project = arguments.get("project", "")
+            environment = arguments.get("environment", "production")
+            option = arguments.get("option", "")
+            value = arguments.get("value")
+            if option not in TARGET_OPTIONS:
+                return {"content": [{"type": "text", "text": f"Error: option must be one of {sorted(TARGET_OPTIONS)}"}], "isError": True}
+            if value is not None and not TARGET_OPTIONS[option](value):
+                return {"content": [{"type": "text", "text": f"Error: invalid value for {option}: {value!r}"}], "isError": True}
+
+            data = load_projects(PROJECTS_FILE)
+            envs = data.get("projects", {}).get(project)
+            target_env = next((e for e in (envs or {}) if e.lower() == environment.lower()), None)
+            if target_env is None:
+                return {"content": [{"type": "text", "text": f"Error: target {project}:{environment} does not exist"}], "isError": True}
+            if value is None:
+                data["projects"][project][target_env].pop(option, None)
+            else:
+                data["projects"][project][target_env][option] = value.lower() if option == "delete_missing" else value
+            save_projects(data)
+            return {
+                "content": [{"type": "text", "text": f"{project}:{target_env} {option} = {value!r}" if value is not None else f"{project}:{target_env} {option} removed (default applies)"}],
+                "isError": False,
+            }
+
         elif tool_name == "set_remote_path":
             project = arguments.get("project", "")
             environment = arguments.get("environment", "production")
@@ -229,7 +337,7 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
             if not remote_path:
                 return {"content": [{"type": "text", "text": "Error: remote_path cannot be empty"}], "isError": True}
 
-            data = load_projects()
+            data = load_projects(PROJECTS_FILE)
             if "projects" not in data:
                 data["projects"] = {}
             if project not in data["projects"]:
@@ -264,6 +372,8 @@ def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any
 
 def run_mcp_server() -> None:
     """Run standard stdio MCP JSON-RPC loop."""
+    # stdout carries the JSON-RPC stream, so deployment progress must go to stderr
+    deployer.console = Console(stderr=True)
     sys.stderr.write("Starting deployctl MCP Server (stdio)...\n")
     sys.stderr.flush()
 
@@ -288,7 +398,7 @@ def run_mcp_server() -> None:
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "deployctl", "version": "0.1.0"},
+                    "serverInfo": {"name": "deployctl", "version": "0.2.0"},
                 },
             }
         elif method == "tools/list":

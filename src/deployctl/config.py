@@ -16,6 +16,7 @@ DEPLOYCTL_HOME = Path.home() / ".deployctl"
 GLOBAL_CONFIG_FILE = DEPLOYCTL_HOME / "config.yaml"
 PROJECTS_FILE = DEPLOYCTL_HOME / "projects.yaml"
 LOGS_DIR = DEPLOYCTL_HOME / "logs"
+DOWNLOADS_DIR = DEPLOYCTL_HOME / "downloads"
 
 DEFAULT_EXCLUDES = [
     ".git*",
@@ -36,8 +37,33 @@ DEFAULT_CONFIG = {
     "enforce_project_isolation": False,
     "confirm_production": True,
     "log_retention_days": 30,
+    # A state cache older than this is ignored and the remote is scanned again (0 = never expires).
+    "state_max_age_days": 7,
     "default_excludes": DEFAULT_EXCLUDES,
 }
+
+
+DELETE_MODES = ("owned", "all", "none")
+
+
+def normalize_delete_missing(value: Any) -> str:
+    """Resolve a target's `delete_missing` setting to one of DELETE_MODES.
+
+    * `owned` (default): only delete files deployctl itself deployed earlier and that are now gone locally;
+      files that exist only on the server (admin uploads, generated files) are never touched.
+    * `all`: delete everything on the server that is not in the local tree (the old behaviour).
+    * `none`: never delete.
+
+    YAML booleans are accepted: `true` means `all`, `false` means `none`. Anything unrecognised falls back to
+    the safe default.
+    """
+    if value is True:
+        return "all"
+    if value is False:
+        return "none"
+    if isinstance(value, str) and value.strip().lower() in DELETE_MODES:
+        return value.strip().lower()
+    return "owned"
 
 
 def ensure_config_dirs() -> None:
