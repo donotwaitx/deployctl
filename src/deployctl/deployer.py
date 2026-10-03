@@ -988,6 +988,7 @@ def _run_deployment(
 
             zip_mb = round(zip_size / (1024 * 1024), 2)
             console.print(f"[cyan]Uploading {zip_name} ({zip_mb} MB) and extractor bridge...[/cyan]")
+            logger.info(f"Uploading {zip_name} ({zip_mb} MB, {zip_size} bytes)")
 
             # Upload zip archive with progress
             with Progress(
@@ -1041,10 +1042,11 @@ def _run_deployment(
             return report.finish(False, "FAILED_ZIP_EXTRACT", f"Remote extraction failed: {extract_msg}")
 
         report.uploaded = total_files
+        report.uploaded_bytes = zip_size
         if report.failed_deletes:
             report.warnings.append(f"{len(report.failed_deletes)} file(s) could not be deleted on the server; the next deployment will retry")
             console.print(f"[yellow]⚠ {len(report.failed_deletes)} file(s) could not be deleted on the server.[/yellow]")
-        console.print(f"\n[bold green]✔ Deployment successful (Zip & PHP Bridge)![/bold green] {total_files} files extracted in {duration:.1f}s.")
+        console.print(f"\n[bold green]✔ Deployment successful (Zip & PHP Bridge)![/bold green] {total_files} files ({zip_mb} MB) extracted in {duration:.1f}s.")
         save_deployment_state(
             project, environment, local_files,
             metadata={"strategy": "zip", "app_url": effective_app_url, "git": git},
@@ -1058,6 +1060,7 @@ def _run_deployment(
     logger.info(f"Uploading {total_files} files ({total_mb} MB)")
 
     success_count = 0
+    uploaded_bytes = 0
     failed_files: list[str] = []
 
     with Progress(
@@ -1069,11 +1072,12 @@ def _run_deployment(
         TimeRemainingColumn(),
         console=console,
     ) as progress:
-        overall_task = progress.add_task("[cyan]Uploading...", total=diff.total_upload_bytes)
+        # ponytail: file index in description gives live counter without a custom progress column
+        overall_task = progress.add_task(f"[cyan]Uploading (0/{total_files})...", total=diff.total_upload_bytes)
 
-        for rel_path in diff.upload_files:
+        for idx, rel_path in enumerate(diff.upload_files, 1):
             local_info = local_files[rel_path]
-            file_task = progress.add_task(f"[dim]{rel_path[:35]}[/dim]", total=local_info.size)
+            file_task = progress.add_task(f"[dim][{idx}/{total_files}] {rel_path[:30]}[/dim]", total=local_info.size)
 
             def _progress_cb(chunk_bytes: int):
                 progress.update(overall_task, advance=chunk_bytes)
@@ -1082,13 +1086,17 @@ def _run_deployment(
             try:
                 provider.upload_file(local_info.abs_path, rel_path, callback=_progress_cb)
                 success_count += 1
+                uploaded_bytes += local_info.size
+                progress.update(overall_task, description=f"[cyan]Uploading ({success_count}/{total_files})...")
+                logger.info(f"[{success_count}/{total_files}] Uploaded {rel_path} ({round(local_info.size / 1024, 1)} KB)")
             except Exception as e:
                 failed_files.append(rel_path)
-                logger.error(f"Failed to upload {rel_path}: {str(e)}")
+                logger.error(f"Failed to upload [{idx}/{total_files}] {rel_path}: {str(e)}")
             finally:
                 progress.remove_task(file_task)
 
     report.uploaded = success_count
+    report.uploaded_bytes = uploaded_bytes
     report.failed_uploads = failed_files
 
     # Deletions and cache cleanup only after every upload succeeded, so a broken deploy never removes files
@@ -1113,11 +1121,12 @@ def _run_deployment(
         report.warnings.append(f"{len(report.failed_deletes)} file(s) could not be deleted on the server; the next deployment will retry")
         console.print(f"[yellow]⚠ {len(report.failed_deletes)} file(s) could not be deleted on the server.[/yellow]")
 
-    console.print(f"\n[bold green]✔ Deployment successful![/bold green] {success_count} files uploaded in {duration:.1f}s.")
+    uploaded_mb = round(uploaded_bytes / (1024 * 1024), 2)
+    console.print(f"\n[bold green]✔ Deployment successful![/bold green] {success_count}/{total_files} files ({uploaded_mb} MB) uploaded in {duration:.1f}s.")
     save_deployment_state(
         project, environment, local_files,
         metadata={"strategy": "standard", "git": git},
         extra_files=report.failed_deletes,
     )
-    logger.finalize("SUCCESS", success_count, duration, {"uploaded_bytes": diff.total_upload_bytes})
+    logger.finalize("SUCCESS", success_count, duration, {"uploaded_bytes": uploaded_bytes})
     return report.finish(True, "SUCCESS" if not report.failed_deletes else "SUCCESS_WITH_WARNINGS", f"{success_count} files uploaded")

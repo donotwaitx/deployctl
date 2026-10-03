@@ -29,6 +29,7 @@ class DeployReport:
     skipped_deletes: list[str] = field(default_factory=list)
     unchanged_count: int = 0
     uploaded: int = 0
+    uploaded_bytes: int = 0
     failed_uploads: list[str] = field(default_factory=list)
     failed_deletes: list[str] = field(default_factory=list)
     post_deploy_deleted: list[str] = field(default_factory=list)
@@ -66,6 +67,7 @@ class DeployReport:
                 "deleted": len(self.deleted),
                 "unchanged": self.unchanged_count,
                 "uploaded": self.uploaded,
+                "uploaded_bytes": self.uploaded_bytes,
             },
             "files": {name: lists[name][:MAX_LISTED_FILES] for name in ("added", "modified", "deleted")},
             "truncated": any(len(files) > MAX_LISTED_FILES for files in lists.values()),

@@ -80,6 +80,7 @@ def test_deploy_fills_report_and_second_run_is_up_to_date(target):
     ok, report = _deploy()
     assert ok and report.status == "SUCCESS"
     assert sorted(report.added) == ["a.txt", "b.txt"] and report.uploaded == 2
+    assert report.uploaded_bytes == 2 and report.to_dict()["counts"]["uploaded_bytes"] == 2
     assert report.diff_source == "ftp_scan"
     assert (target.remote / "b.txt").read_text() == "b"
 
