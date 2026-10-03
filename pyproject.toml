@@ -5,7 +5,7 @@ description = "Secure, ultra-fast differential deployment CLI & Model Context Pr
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
-    { name = "deployctl Team", email = "contact@deployctl.dev" }
+    { name = "donotwaitx" }
 ]
 keywords = [
     "deployment",
