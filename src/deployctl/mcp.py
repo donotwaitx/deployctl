@@ -226,6 +226,21 @@ MCP_TOOLS = [
     },
 ]
 
+# (readOnly, destructive, idempotent, openWorld) per tool; all four hints are always declared.
+_HINTS = {
+    "deploy_project": (False, True, True, True),
+    "list_projects": (True, False, True, False),
+    "test_connection": (True, False, True, True),
+    "show_project": (True, False, True, False),
+    "browse_remote_directories": (True, False, True, True),
+    "download_remote_file": (False, False, True, True),  # writes a local file only
+    "set_target_option": (False, False, True, False),
+    "set_remote_path": (False, False, True, False),
+}
+for _t in MCP_TOOLS:
+    _t["annotations"] = dict(zip(
+        ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"), _HINTS[_t["name"]]))
+
 
 def handle_tool_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Execute tool and return MCP formatted content response."""

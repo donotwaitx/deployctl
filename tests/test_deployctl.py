@@ -325,3 +325,30 @@ def test_mcp_lists_download_tool():
     from deployctl.mcp import MCP_TOOLS
 
     assert "download_remote_file" in [t["name"] for t in MCP_TOOLS]
+
+
+def test_every_mcp_tool_declares_all_annotations_and_is_handled():
+    from deployctl.mcp import MCP_TOOLS, handle_tool_call
+
+    for t in MCP_TOOLS:
+        a = t["annotations"]
+        assert set(a) == {"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"}
+        assert all(isinstance(v, bool) for v in a.values()), t["name"]
+        # every listed tool name must be dispatched (not "Unknown tool")
+        out = handle_tool_call(t["name"], {})["content"][0]["text"]
+        assert not out.startswith("Unknown tool"), t["name"]
+
+
+import pytest
+
+
+@pytest.mark.parametrize("name", [
+    "deploy_project", "list_projects", "test_connection", "show_project",
+    "browse_remote_directories", "download_remote_file", "set_target_option", "set_remote_path",
+])
+def test_mcp_tool_is_listed_and_dispatched_by_name(name):
+    from deployctl.mcp import MCP_TOOLS, handle_tool_call
+
+    assert name in [t["name"] for t in MCP_TOOLS]
+    # empty args must produce a handled error/result, never "Unknown tool"
+    assert not handle_tool_call(name, {})["content"][0]["text"].startswith("Unknown tool")

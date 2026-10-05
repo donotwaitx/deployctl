@@ -4,6 +4,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue.svg)](https://www.python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![MCP Ready](https://img.shields.io/badge/MCP-Enabled-green.svg)](https://modelcontextprotocol.io)
+[![M8ven Score](https://m8ven.ai/badge/mcp/donotwaitx/deployctl)](https://m8ven.ai/mcp/donotwaitx/deployctl?s=readme)
 
 > **Secure, Ultra-Fast Differential Deployment CLI & Model Context Protocol (MCP) Server for AI Agents (Antigravity, Claude Code) and Developers.**
 
