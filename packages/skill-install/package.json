@@ -1,0 +1,29 @@
+{
+  "name": "deployctl-skill",
+  "version": "0.2.0",
+  "description": "Zero-config installer for the official deployctl Agent Skill across Claude Code, Cursor, and AI agents.",
+  "type": "module",
+  "bin": {
+    "deployctl-skill": "./bin/install.js",
+    "deployctl-skill-install": "./bin/install.js"
+  },
+  "files": [
+    "bin/",
+    "skills/",
+    "README.md"
+  ],
+  "keywords": [
+    "deployctl",
+    "agent-skill",
+    "claude-code",
+    "cursor",
+    "copilot",
+    "mcp",
+    "deployment"
+  ],
+  "author": "donotwaitx",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

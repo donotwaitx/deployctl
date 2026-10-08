@@ -221,6 +221,37 @@ Add to `~/.claude.json` or project settings:
 
 ---
 
+## 🧠 Official AI Agent Skill
+
+`deployctl` provides an official **Agent Skill** (`SKILL.md`) that teaches AI coding assistants (Claude Code, Cursor, GitHub Copilot, Google Antigravity, OpenHands) how to safely inspect, preview diffs, and execute deployments without leaking credentials.
+
+### Option 1: Using deployctl CLI (Fastest)
+```bash
+# Install globally for all detected agents (Claude Code, Cursor, Antigravity)
+deployctl skill install
+
+# Or target a specific agent
+deployctl skill install --agent claude
+deployctl skill install --agent cursor
+```
+
+### Option 2: Using NPX (Zero Install)
+```bash
+npx deployctl-skill
+# or target a specific agent
+npx deployctl-skill --agent claude
+```
+
+### Option 3: Package for Marketplaces (Agensi / Glama)
+```bash
+deployctl skill package
+# -> Generates dist/deployctl-skill.zip ready for one-click marketplace uploads
+```
+
+See [`skills/deployctl/README.md`](skills/deployctl/README.md) for detailed configuration options.
+
+---
+
 ## 🔄 GitHub Actions CI/CD Integration
 
 ### Option A: Using the Official GitHub Action (Recommended)

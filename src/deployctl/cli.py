@@ -70,6 +70,13 @@ remote_app = typer.Typer(
 )
 app.add_typer(remote_app, name="remote")
 
+skill_app = typer.Typer(
+    name="skill",
+    help="Install and package official deployctl Agent Skills for AI coding assistants.",
+    no_args_is_help=True,
+)
+app.add_typer(skill_app, name="skill")
+
 console = Console()
 err_console = Console(stderr=True)
 
@@ -839,4 +846,67 @@ def remote_scan_cmd(
     except Exception as e:
         err_console.print(f"[bold red]Remote scan failed:[/bold red] {str(e)}")
         raise typer.Exit(code=1)
+
+
+# --- Skill subcommands ---
+
+
+@skill_app.command("install")
+def skill_install_cmd(
+    agent: str = typer.Option("all", "--agent", "-a", help="Target AI agent: claude, cursor, antigravity, or all"),
+    is_global: bool = typer.Option(True, "--global/--project", "-g/-p", help="Install globally in user profile or locally in current project"),
+):
+    """Install the official deployctl Agent Skill for Claude Code, Cursor, or Antigravity."""
+    from deployctl.skill_installer import (
+        install_skill_for_antigravity,
+        install_skill_for_claude,
+        install_skill_for_cursor,
+    )
+
+    agent_lower = agent.lower().strip()
+    installed_files: list[Path] = []
+
+    try:
+        if agent_lower in ("claude", "all"):
+            installed_files.extend(install_skill_for_claude(is_global=is_global))
+        if agent_lower in ("cursor", "all"):
+            installed_files.extend(install_skill_for_cursor(is_global=is_global))
+        if agent_lower in ("antigravity", "all"):
+            installed_files.extend(install_skill_for_antigravity())
+
+        if not installed_files:
+            console.print(f"[yellow]No files were installed for agent '{agent}'. Supported: claude, cursor, antigravity, all[/yellow]")
+            return
+
+        console.print("[bold green]✔ deployctl Agent Skill installed successfully![/bold green]")
+        for f in installed_files:
+            console.print(f"  • [cyan]{f}[/cyan]")
+    except Exception as e:
+        err_console.print(f"[bold red]✖ Failed to install skill:[/bold red] {str(e)}")
+        raise typer.Exit(code=1)
+
+
+@skill_app.command("package")
+def skill_package_cmd(
+    out_dir: Optional[str] = typer.Option(None, "--out-dir", "-o", help="Output directory for ZIP bundle (default: dist/)"),
+):
+    """Package the deployctl skill into a marketplace-ready ZIP archive."""
+    from deployctl.skill_installer import package_skill_zip
+
+    try:
+        target_dir = Path(out_dir) if out_dir else None
+        zip_file = package_skill_zip(output_dir=target_dir)
+        console.print(f"[bold green]✔ Packaged skill archive:[/bold green] [bold cyan]{zip_file}[/bold cyan]")
+    except Exception as e:
+        err_console.print(f"[bold red]✖ Failed to package skill:[/bold red] {str(e)}")
+        raise typer.Exit(code=1)
+
+
+@skill_app.command("path")
+def skill_path_cmd():
+    """Print the canonical path to the deployctl SKILL.md file."""
+    from deployctl.skill_installer import get_canonical_skill_path
+
+    skill_path = get_canonical_skill_path()
+    console.print(str(skill_path))
 

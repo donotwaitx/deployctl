@@ -6,3 +6,11 @@ startCommand:
   config:
     command: deployctl
     args: ["mcp"]
+
+metadata:
+  name: deployctl
+  description: Secure, ultra-fast differential deployment CLI & MCP server for AI Agents.
+  version: 0.2.0
+  skills:
+    - name: deployctl
+      path: skills/deployctl/SKILL.md
