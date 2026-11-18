@@ -38,7 +38,7 @@ from deployctl.config import (
     save_projects,
 )
 from deployctl.credentials import get_credential
-from deployctl.diff import compute_diff, format_diff_text, scan_local_files
+from deployctl.diff import build_skip, compute_diff, format_diff_text, framework_includes, git_ignored_paths, read_ignore_file, scan_local_files
 from deployctl.gitinfo import evaluate_git_policy, get_git_context
 from deployctl.lock import deploy_lock
 from deployctl.logger import DeployLogger
@@ -777,8 +777,17 @@ def _run_deployment(
         return report.finish(False, "PROVIDER_ERROR", sanitize_text(str(e), [password] if password else None))
 
     # 5. Scan Local Files and Compute Diff
-    exclude_patterns = env_cfg.get("exclude", [])
-    local_files = scan_local_files(local_dir, exclude_patterns)
+    exclude_patterns = list(env_cfg.get("exclude", []))
+    # Project-level ignore files, appended last so their `!negations` can override the defaults.
+    git_ignored = git_ignored_paths(local_dir) if env_cfg.get("use_gitignore", True) else None
+    deployignore = read_ignore_file(local_dir / ".deployignore")  # explicit user rules: nothing overrides them
+    auto_include = env_cfg.get("auto_include", True)
+    include_patterns = (
+        framework_includes(local_dir) if auto_include is True else list(auto_include) if isinstance(auto_include, list) else []
+    )
+    skip = build_skip(exclude_patterns, git_ignored, include_patterns, deployignore)
+    local_files = scan_local_files(local_dir, exclude_patterns, skip=skip)
+    exclude_patterns += deployignore  # also protects those paths from remote deletion
 
     max_age_days = global_cfg.get("state_max_age_days", 7)
     if cached_state and max_age_days:
@@ -793,7 +802,7 @@ def _run_deployment(
         # Instant diff using local state cache (~0.02s)
         report.diff_source = "state_cache"
         remote_files = cached_state.get("files", {})
-        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns, skip=skip)
     else:
         remote_files = {}
         scanned_via_bridge = False
@@ -858,7 +867,7 @@ def _run_deployment(
                     logger.error(f"Connection failed: {str(e)}")
                     return report.finish(False, "CONNECTION_FAILED", sanitize_text(str(e), [password] if password else None))
 
-        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns)
+        diff = compute_diff(local_files, remote_files, detect_deletions=True, exclude_patterns=exclude_patterns, skip=skip)
 
     # Server files take priority: by default only files deployctl deployed earlier (the state manifest) may be
     # deleted. Files that exist only on the server (admin uploads, generated files) are reported, never removed.
