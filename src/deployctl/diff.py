@@ -6,12 +6,16 @@ and compares with remote state.
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import os
+import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import Callable
 from pathlib import Path
 from typing import Any
+
+import pathspec
 
 
 # Files up to this size get a content hash (local scan, state cache and the PHP scan bridge all use it); larger
@@ -60,31 +64,127 @@ class DiffResult:
         return self.added + self.modified
 
 
-def is_excluded(rel_path: str, exclude_patterns: list[str]) -> bool:
-    """Check if a relative path matches any exclusion patterns."""
-    # Normalize with forward slashes
-    norm_path = rel_path.replace("\\", "/")
-    parts = norm_path.split("/")
+def _normalize_pattern(pattern: str) -> str:
+    """Legacy `dir/**` means "the directory and everything in it": rewrite it to the gitignore form `dir`."""
+    if pattern.endswith("/**") and len(pattern) > 3 and not pattern.startswith("#"):
+        return pattern[:-3]
+    return pattern
 
-    for pattern in exclude_patterns:
-        # Check against full path
-        if fnmatch.fnmatch(norm_path, pattern):
-            return True
-        # Check against filename / dirname
-        if any(fnmatch.fnmatch(part, pattern) for part in parts):
-            return True
-        # Check wildcard directory prefix
-        if pattern.endswith("/**"):
-            prefix = pattern[:-3]
-            if norm_path == prefix or norm_path.startswith(prefix + "/") or prefix in parts:
-                return True
 
-    return False
+@lru_cache(maxsize=32)
+def _compile_patterns(patterns: tuple[str, ...]) -> pathspec.PathSpec:
+    return pathspec.PathSpec.from_lines("gitignore", [_normalize_pattern(p) for p in patterns])
+
+
+def is_excluded(rel_path: str, exclude_patterns: list[str], is_dir: bool = False) -> bool:
+    """Check a relative path against exclusion patterns using `.gitignore` semantics.
+
+    Supports `#` comments, `!` negation (last match wins), a leading `/` to anchor to the project root,
+    a trailing `/` for directories only, and `*`, `?`, `[a-z]` and `**`.
+    """
+    if not exclude_patterns:
+        return False
+    norm_path = rel_path.replace("\\", "/").strip("/")
+    if not norm_path or norm_path == ".":
+        return False
+    if is_dir:
+        norm_path += "/"
+    return _compile_patterns(tuple(exclude_patterns)).match_file(norm_path)
+
+
+def read_ignore_file(path: Path) -> list[str]:
+    """Read the pattern lines of a `.gitignore`-style file (empty list when it does not exist)."""
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def git_ignored_paths(local_dir: Path) -> set[str] | None:
+    """Paths git itself ignores under `local_dir` (nested .gitignore, global ignore, .git/info/exclude).
+
+    Ignored directories are reported once with a trailing `/`. Returns `None` when `local_dir` is not
+    inside a git work tree or git is unavailable. Tracked files are never reported, as in git.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(local_dir), "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"],
+            capture_output=True, timeout=30, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {p for p in out.decode("utf-8", "surrogateescape").split("\0") if p}
+
+
+def _is_git_ignored(rel_path: str, ignored: set[str]) -> bool:
+    if rel_path in ignored or rel_path + "/" in ignored:
+        return True
+    parts = rel_path.split("/")
+    return any("/".join(parts[:i]) + "/" in ignored for i in range(1, len(parts)))
+
+
+# Never uploaded, whatever the framework rules or `use_gitignore` say.
+ALWAYS_EXCLUDE = [".git/", ".env", ".env.*", "node_modules/", ".DS_Store"]
+
+# Paths that git ignores (or the default excludes drop) but a production server needs to run the app.
+LARAVEL_INCLUDES = [
+    "/vendor/",  # composer dependencies: git ignores them, shared FTP hosting has no composer
+    "/public/",  # uploads, thumbs, built assets
+    "/storage/**/.gitignore",  # keeps the storage/* skeleton (cache, sessions, views, logs...) without its runtime files
+    "/bootstrap/cache/.gitignore",
+]
+
+
+def framework_includes(local_dir: Path) -> list[str]:
+    """Include rules for the detected framework (Laravel: `artisan` + `composer.json`), else none."""
+    if (local_dir / "artisan").is_file() and (local_dir / "composer.json").is_file():
+        return list(LARAVEL_INCLUDES)
+    return []
+
+
+def _may_contain_included(rel_dir: str, include_patterns: list[str]) -> bool:
+    """True when an include rule could match something inside `rel_dir` (so the directory must be entered)."""
+    roots = [p.strip("/").split("/")[0] for p in include_patterns if not p.startswith("!")]
+    return bool(roots) and rel_dir.replace("\\", "/").split("/")[0] in roots
+
+
+def build_skip(
+    exclude_patterns: list[str],
+    git_ignored: set[str] | None = None,
+    include_patterns: list[str] | None = None,
+    final_excludes: list[str] | None = None,
+) -> Callable[[str, bool], bool]:
+    """Return `skip(rel_path, is_dir)`: True when the path is not part of the deployment.
+
+    Excluded by patterns or git unless an include rule rescues it; `ALWAYS_EXCLUDE` and `final_excludes`
+    (the user's `.deployignore`) always win. The same predicate protects remote files from deletion.
+    """
+    include_patterns = include_patterns or []
+    final = ALWAYS_EXCLUDE + (final_excludes or [])
+
+    def skip(rel: str, is_dir: bool) -> bool:
+        rel = rel.replace("\\", "/")
+        if is_excluded(rel, final, is_dir=is_dir):
+            return True
+        hit = is_excluded(rel, exclude_patterns, is_dir=is_dir) or bool(git_ignored and _is_git_ignored(rel, git_ignored))
+        if not hit:
+            return False
+        if include_patterns:
+            if is_dir:
+                return not _may_contain_included(rel, include_patterns)
+            return not is_excluded(rel, include_patterns)
+        return True
+
+    return skip
 
 
 def scan_local_files(
     local_dir: Path,
     exclude_patterns: list[str],
+    git_ignored: set[str] | None = None,
+    include_patterns: list[str] | None = None,
+    final_excludes: list[str] | None = None,
+    skip: Callable[[str, bool], bool] | None = None,
 ) -> dict[str, LocalFileInfo]:
     """Scan local directory and return mapping of relative path -> LocalFileInfo."""
     local_dir = local_dir.resolve()
@@ -93,21 +193,18 @@ def scan_local_files(
     if not local_dir.exists():
         return result
 
-    for root, dirs, files in os.walk(local_dir):
-        # Prune excluded directories early for performance
-        root_rel = os.path.relpath(root, local_dir)
-        if root_rel != ".":
-            if is_excluded(root_rel, exclude_patterns):
-                dirs.clear()
-                continue
+    skip = skip or build_skip(exclude_patterns, git_ignored, include_patterns, final_excludes)
 
-        dirs[:] = [d for d in dirs if not is_excluded(os.path.join(root_rel if root_rel != "." else "", d), exclude_patterns)]
+    for root, dirs, files in os.walk(local_dir):
+        root_rel = os.path.relpath(root, local_dir)
+        # Prune excluded directories early for performance
+        dirs[:] = [d for d in dirs if not skip(os.path.join(root_rel, d) if root_rel != "." else d, True)]
 
         for file_name in files:
             full_path = Path(root) / file_name
             rel_path = os.path.relpath(full_path, local_dir).replace("\\", "/")
 
-            if is_excluded(rel_path, exclude_patterns):
+            if skip(rel_path, False):
                 continue
 
             try:
@@ -129,6 +226,7 @@ def compute_diff(
     remote_files: dict[str, Any],
     detect_deletions: bool = False,
     exclude_patterns: list[str] | None = None,
+    skip: Callable[[str, bool], bool] | None = None,
 ) -> DiffResult:
     """Compare local files with remote files to determine changes.
     
@@ -178,7 +276,7 @@ def compute_diff(
             if rel_path in local_files:
                 continue
             # Never delete remote files that are excluded from deployment (.env, storage, ...)
-            if exclude_patterns and is_excluded(rel_path, exclude_patterns):
+            if (skip and skip(rel_path, False)) or (exclude_patterns and is_excluded(rel_path, exclude_patterns)):
                 continue
             diff.deleted.append(rel_path)
 

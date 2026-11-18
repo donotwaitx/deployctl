@@ -138,6 +138,24 @@ projects:
 * Only one deployment per `project:environment` runs at a time.
 * `post_deploy_delete` patterns are relative to `remote_path`; only the file-name part may contain wildcards.
 
+### 6. What gets uploaded (gitignore-style rules)
+
+deployctl follows **git** when it decides what to upload:
+
+1. **`.gitignore` is honoured** (nested files, global ignore and `.git/info/exclude` too; files tracked by git are never dropped). Turn it off per target with `use_gitignore: false`. Folders that are not git repositories skip this step.
+2. **`exclude` patterns** (`~/.deployctl/config.yaml` `default_excludes` plus the target's `exclude:`) use full gitignore syntax: `#` comments, `!negation` (last match wins), `/leading` anchors to the project root, `trailing/` matches directories only, `*`, `?`, `**`.
+3. **`.deployignore`** in the deploy folder: same syntax, one pattern per line, e.g. keep internal audit reports off the server:
+
+   ```gitignore
+   /connecttech.vn-audit/
+   *.psd
+   ```
+
+   Nothing overrides `.deployignore`, and its paths are also protected from deletion on the server.
+4. **Laravel auto-include** (detected by `artisan` + `composer.json`): paths that git ignores but a FTP server needs are uploaded anyway: `vendor/`, `public/` (uploads, thumbs, built assets) and the `.gitignore` placeholders that keep `storage/**` and `bootstrap/cache/` folders in place. Runtime files (`storage/logs`, caches, debugbar) are never uploaded or deleted. Disable it with `auto_include: false`, or give your own list: `auto_include: ["/vendor/", "/public/"]`.
+
+`.git/`, `.env`, `.env.*` and `node_modules/` are never uploaded, whatever the rules say. Dry-run first (`deployctl deploy <project> --dry-run`) to see the exact list.
+
 ---
 
 ## 📖 CLI Reference

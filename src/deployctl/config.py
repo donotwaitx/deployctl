@@ -182,7 +182,8 @@ def get_project_target(project_name: str, env_name: str = "production") -> dict[
     combined_excludes = list(global_cfg.get("default_excludes", DEFAULT_EXCLUDES))
     if "exclude" in env_cfg and isinstance(env_cfg["exclude"], list):
         combined_excludes.extend(env_cfg["exclude"])
-    env_cfg["exclude"] = list(set(combined_excludes))
+    # Order matters (gitignore semantics: the last matching pattern wins), so de-duplicate without reordering.
+    env_cfg["exclude"] = list(dict.fromkeys(combined_excludes))
 
     return env_cfg
 

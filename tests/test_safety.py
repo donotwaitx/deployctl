@@ -517,3 +517,75 @@ def test_mcp_set_target_option_validates_and_edits_the_registry(tmp_path, monkey
 
     assert call(option="delete_missing", value=None)["isError"] is False
     assert "delete_missing" not in registry.read_text() and "develop" in registry.read_text()
+
+
+def test_exclude_uses_gitignore_semantics():
+    assert is_excluded("connecttech.vn-audit/report.md", ["/connecttech.vn-audit/"])
+    assert is_excluded("connecttech.vn-audit", ["/connecttech.vn-audit/"], is_dir=True)
+    assert not is_excluded("sub/connecttech.vn-audit/x", ["/connecttech.vn-audit/"])  # anchored to the root
+    assert not is_excluded("audit", ["audit/"])  # trailing slash = directories only
+    assert is_excluded("a/b/shot.png", ["*.png"])
+    assert is_excluded("docs/a/b.md", ["docs/**/*.md"])
+    assert is_excluded("# x", ["# x"]) is False  # comments are not patterns
+    assert not is_excluded("keep.log", ["*.log", "!keep.log"])  # negation, last match wins
+    assert is_excluded("other.log", ["*.log", "!keep.log"])
+
+
+def test_scan_follows_git_ignore_rules(tmp_path):
+    import subprocess
+
+    from deployctl.diff import git_ignored_paths, scan_local_files
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("audit/\n*.tmp\n")
+    (tmp_path / "audit").mkdir()
+    (tmp_path / "audit" / "r.md").write_text("x")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / ".gitignore").write_text("secret.txt\n")
+    (tmp_path / "sub" / "secret.txt").write_text("x")
+    (tmp_path / "sub" / "ok.php").write_text("x")
+    (tmp_path / "a.tmp").write_text("x")
+    (tmp_path / "index.php").write_text("x")
+
+    files = scan_local_files(tmp_path, [".git/"], git_ignored_paths(tmp_path))
+    assert set(files) == {".gitignore", "sub/.gitignore", "sub/ok.php", "index.php"}
+    assert git_ignored_paths(tmp_path / "nonexistent") is None
+
+
+def test_laravel_ships_vendor_public_and_storage_skeleton_but_not_runtime_files(tmp_path):
+    import subprocess
+
+    from deployctl.diff import build_skip, compute_diff, framework_includes, git_ignored_paths, scan_local_files
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    files = {
+        "artisan": "", "composer.json": "{}", "index.php": "", ".env": "SECRET",
+        ".gitignore": "/vendor\n/public/uploads\n.env\n/storage/logs/*\n!/storage/logs/.gitignore\naudit/\n",
+        "vendor/autoload.php": "", "vendor/pkg/.git/config": "", "vendor/pkg/.gitignore": "",
+        "public/uploads/a.jpg": "", "public/index.php": "",
+        "storage/logs/.gitignore": "*\n", "storage/logs/laravel.log": "log",
+        "storage/framework/views/.gitignore": "*\n", "audit/r.md": "",
+    }
+    for name, text in files.items():
+        f = tmp_path / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+
+    inc = framework_includes(tmp_path)
+    ignored = git_ignored_paths(tmp_path)
+    exclude = [".git*", ".env*", "node_modules/**"]
+    skip = build_skip(exclude, ignored, inc)
+    got = set(scan_local_files(tmp_path, exclude, skip=skip))
+
+    assert {"vendor/autoload.php", "public/uploads/a.jpg", "public/index.php", "storage/logs/.gitignore",
+            "storage/framework/views/.gitignore", "index.php"} <= got
+    assert not got & {".env", "storage/logs/laravel.log", "audit/r.md", "vendor/pkg/.git/config"}
+
+    # remote runtime files are not deleted; a stale vendor file is
+    remote = {"storage/logs/laravel.log": {"size": 1}, "vendor/old.php": {"size": 1}, ".env": {"size": 1}}
+    d = compute_diff({}, remote, detect_deletions=True, exclude_patterns=exclude, skip=skip)
+    assert d.deleted == ["vendor/old.php"]
+
+    # .deployignore-style final excludes beat the framework rules
+    skip2 = build_skip(exclude, ignored, inc, ["/vendor/"])
+    assert not any(p.startswith("vendor/") for p in scan_local_files(tmp_path, exclude, skip=skip2))
