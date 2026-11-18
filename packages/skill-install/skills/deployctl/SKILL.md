@@ -50,6 +50,12 @@ This skill guides AI agents (Claude Code, Cursor, Copilot, Antigravity, and othe
 4. **Git Policy Constraints:**
    - Do not pass `force_branch=true` or `--force` unless the user explicitly asks to override branch policy or deploy dirty working tree changes.
 
+5. **What Gets Uploaded (gitignore-style):**
+   - `deployctl` follows git: `.gitignore` is honoured (`use_gitignore: false` disables it), `exclude` patterns and the project's `.deployignore` use full gitignore syntax (`!negation`, `/anchored`, `dir/`, `**`).
+   - `.deployignore` always wins. To keep a folder off the server (audit reports, design files), add it there instead of moving it.
+   - Laravel projects (`artisan` + `composer.json`) automatically include `vendor/`, `public/` and the `storage/**` folder skeleton even though git ignores them (`auto_include: false` disables). `.env*`, `.git/`, `node_modules/` and storage runtime files are never uploaded.
+   - Always read the dry-run file list for unexpected folders before asking for confirmation.
+
 ---
 
 ## 🔄 Workflow Execution Guide
